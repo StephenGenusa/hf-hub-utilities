@@ -33,14 +33,15 @@ curl -LsSf https://hf.co/cli/install.sh | bash
 
 ## `hfu` — Hub Downloader
 
-Accepts any of the formats the Hub uses and calls `hf download` for you.
+Accepts any of the formats the Hub uses and calls `hf download` for you. Files land in the shared **hub cache** (`~/.cache/huggingface/hub`), exactly as if you had run `hf download` yourself.
 
 ### Supported Input Formats
 
 ```
-https://huggingface.co/<org>/<name>
+https://huggingface.co/<org>/<name>            (…/tree/main, …/blob/…, ?query are fine)
 https://huggingface.co/datasets/<org>/<name>
 https://huggingface.co/spaces/<org>/<name>
+https://hf.co/<org>/<name>
 <org>/<name>
 models/<org>/<name>
 datasets/<org>/<name>
@@ -50,8 +51,37 @@ spaces/<org>/<name>
 ### Usage
 
 ```
-hfu <url_or_path>
+hfu <url_or_path> [-q QUANT ...] [--mmproj MODE] [hf download options...]
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-q`, `--quant NAME` | interactive picker | Quant to download from a GGUF repo. Repeatable or comma-separated (`-q Q8_0,UD-Q4_K_S`). Exact, case-insensitive match. |
+| `--mmproj MODE` | auto | Which mmproj to include for vision models: `F16`, `BF16`, `F32`, `all`, or `none`. Auto prefers F16 → BF16 → F32. |
+| *anything else* | — | Passed straight to `hf download` (`--revision`, `--local-dir`, `--dry-run`, `--token`, …). |
+
+### GGUF repos: quant picker
+
+When the repo contains `.gguf` weight files, `hfu` lists the available quants with their sizes (sharded quants are shown as one entry) and prompts for a choice:
+
+```
+$ hfu unsloth/Qwen3.6-35B-A3B-GGUF
+📦 unsloth/Qwen3.6-35B-A3B-GGUF: 24 quants available
+👁  vision model — will include: mmproj-F16.gguf
+
+ # ┃ Quant        ┃     Size ┃
+ 1 │ UD-IQ1_M     │  9.36 GB │
+ …
+13 │ UD-Q4_K_S    │ 19.46 GB │
+ …
+24 │ BF16         │ 64.61 GB │ 2 files
+Pick a quant [1-24, comma-separated ok, q to quit]: 13
+🔧 Command: hf download unsloth/Qwen3.6-35B-A3B-GGUF Qwen3.6-35B-A3B-UD-Q4_K_S.gguf mmproj-F16.gguf README.md
+```
+
+The chosen files are passed to `hf download` **by exact filename** (never globs), so `Q4_K_S` can't accidentally pull in `Q4_K_XL`. `README.md` is included when present. If the repo ships `mmproj-*.gguf` files (vision model), one is added automatically.
+
+Non-GGUF models, datasets, and spaces are downloaded in full, as before. If stdin is not a terminal, the picker is skipped and you must pass `-q`.
 
 ### Examples
 
@@ -59,17 +89,21 @@ hfu <url_or_path>
 # Full URL — model (default type)
 hfu https://huggingface.co/zai-org/GLM-OCR
 
-# Full URL — dataset
+# Dataset / space
 hfu https://huggingface.co/datasets/davanstrien/enc-brit-glm-ocr-v2-full
-
-# Short path — model
-hfu zai-org/GLM-OCR
-
-# Short path — dataset
-hfu datasets/davanstrien/enc-brit-glm-ocr-v2-full
-
-# Short path — space
 hfu spaces/black-forest-labs/FLUX.1-schnell
+
+# GGUF repo — interactive picker
+hfu unsloth/Qwen3.6-35B-A3B-GGUF
+
+# GGUF repo — scripted, with a specific mmproj precision
+hfu unsloth/Qwen3.6-35B-A3B-GGUF -q UD-Q4_K_S --mmproj BF16
+
+# Two quants at once, and see what would happen first
+hfu unsloth/Qwen3.6-35B-A3B-GGUF -q Q8_0,UD-Q4_K_S --dry-run
+
+# Opt out of the cache for one download
+hfu unsloth/Qwen3.6-35B-A3B-GGUF -q Q8_0 --local-dir ./models/qwen
 ```
 
 Download progress streams live to the terminal.

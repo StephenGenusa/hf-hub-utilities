@@ -7,6 +7,9 @@ dependencies = [
     "hf-xet",
 ]
 
+[dependency-groups]
+dev = ["pytest"]
+
 [tool.setuptools]
 py-modules = ["hfu", "hf_xfer"]
 

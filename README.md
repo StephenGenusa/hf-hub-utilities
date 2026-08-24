@@ -4,7 +4,7 @@ Two command-line tools for working with [Hugging Face Hub](https://huggingface.c
 
 | Tool | Purpose |
 |------|---------|
-| `hfu` | Download any Hub repo from a URL, path, or `org/name` shorthand |
+| `hfu` | Download any Hub repo from a URL, path, or `org/name` shorthand. Don't make me think |
 | `hf-xfer` | Bidirectionally translate between a `--local-dir` flat copy and the shared hub cache |
 
 ---

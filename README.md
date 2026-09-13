@@ -245,14 +245,16 @@ hf-xfer view remove --foreign <foreign key> --execute
 Rules:
 
 - Dry run is the default. Nothing is written without `--execute`.
+- Safety brakes: if the cache directory itself is missing, sync reports it and does nothing; if a plan would remove every entry sync owns in a view, that view is refused unless you pass `--allow-mass-removal`. A view whose root does not exist is skipped with a notice, never created.
 - Deleting a model inside LM Studio or with `ollama rm` sticks: sync records a tombstone and does not recreate it.
 - Deleting only a secondary file (an alias manifest, a projector link, an mmproj link) is treated as damage and repaired on the next sync; deleting the primary file (the weight link in LM Studio, the `hf.co` manifest or model blob link in Ollama) is what records a tombstone.
-- Sync never deletes or overwrites anything it did not create. Files that appear in a view without HF backing are listed as *foreign*.
+- Sync never deletes or overwrites anything it did not create, with one exception: an Ollama blob that no manifest references any more is removed the same way `ollama rm` would remove it. Files that appear in a view without HF backing are listed as *foreign*.
+- Sharded GGUFs are not grouped: each shard is its own entry. LM Studio gets a link per shard beside its siblings; Ollama skips shards with a warning, because it does not load split GGUFs.
 - `view remove --foreign <key>` is the only command that deletes something sync did not create; for Ollama it removes the manifest and any blob no other manifest references, and it requires `--execute`.
 - Ollama manifests are built from `https://huggingface.co/v2/<org>/<name>/manifests/<file>` so templates and parameters match what `ollama pull hf.co/...` would produce, but the model layer always points at your local file, so cached files that are behind the Hub still work. The registry response and config are cached under `<root>/.hfhub-registry/`, so later `--offline` runs need no network for entries already seen; if the network is actually down, the affected entries are skipped with a notice rather than failing the run. Repos that do not exist on the Hub get a minimal manifest and rely on the chat template embedded in the GGUF.
 - `hfu` runs `sync --execute` after every successful download; pass `--no-sync` to skip.
 
-Ollama needs read access to the cache and write access to the view root. With Ollama running as its own user, put the view root on the same drive as the cache, `chgrp ollama` it, `chmod 2775`, and set `OLLAMA_MODELS` in a systemd override together with `RequiresMountsFor=<mount point>`.
+Ollama needs read access to the cache and write access to the view root. The view roots must exist before the first sync - sync skips a view whose root is missing rather than creating it, so `mkdir -p` them first. With Ollama running as its own user, put the view root on the same drive as the cache, `chgrp ollama` it, `chmod 2775`, and set `OLLAMA_MODELS` in a systemd override together with `RequiresMountsFor=<mount point>`.
 
 ---
 

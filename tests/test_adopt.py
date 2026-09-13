@@ -6,7 +6,7 @@ from hfhub import adopt, cache, config as cfg, sync, state as st
 from hfhub.views.base import ForeignItem
 from hfhub.xfer import RepoMap
 from tests.hub_fixture import add_repo
-from tests.test_ollama import gguf_bytes, FIX
+from tests.test_ollama import gguf_bytes
 
 MT_MODEL = "application/vnd.ollama.image.model"
 MT_TEMPLATE = "application/vnd.ollama.image.template"

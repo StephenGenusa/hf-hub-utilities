@@ -26,6 +26,8 @@ def _parser() -> argparse.ArgumentParser:
     view_opt(s)
     s.add_argument("--execute", action="store_true", help="write changes (default: dry run)")
     s.add_argument("--offline", action="store_true", help="never contact huggingface.co")
+    s.add_argument("--allow-mass-removal", action="store_true",
+                   help="apply a plan that removes every entry sync owns in a view")
 
     v = sub.add_parser("view", help="inspect or edit view entries")
     vs = v.add_subparsers(dest="vcmd", required=True)
@@ -46,6 +48,11 @@ def _parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser("dupes", help="list foreign files that look like cache entries")
     view_opt(d)
+
+    # Intercepted in xfer_main before argparse ever sees them; they are here so
+    # that `hf-xfer --help` lists every command the tool actually has.
+    sub.add_parser("import", add_help=False, help="local-dir -> cache (run `hf-xfer import --help`)")
+    sub.add_parser("export", add_help=False, help="cache -> local-dir (run `hf-xfer export --help`)")
     return ap
 
 
@@ -57,7 +64,8 @@ def xfer_main(argv: list[str] | None = None) -> int:
     config = cfg.load()
     views = args.view or ALL_VIEWS
     if args.cmd == "sync":
-        sync.run(config, views, execute=args.execute, offline=args.offline, out=print)
+        sync.run(config, views, execute=args.execute, offline=args.offline, out=print,
+                 allow_mass_removal=args.allow_mass_removal)
         return 0
     if args.cmd == "view":
         if args.vcmd == "status":

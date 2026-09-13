@@ -1,6 +1,7 @@
 """Drive reconcile/apply for each configured view."""
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,18 @@ from hfhub.views.ollama import OllamaView
 from hfhub.xfer import resolve_cache_dir
 
 Out = Callable[[str], None]
+
+
+class ViewSkipped(Exception):
+    """This view cannot be synced right now; the message is the notice to print."""
+
+
+class MissingRoot(ViewSkipped):
+    pass
+
+
+class MassRemoval(ViewSkipped):
+    """Applying the plan would empty the view of everything sync owns there."""
 
 
 def hub_dir() -> Path:
@@ -42,16 +55,62 @@ def build_view(name: str, config: cfg.Config, offline: bool = False) -> View | N
     raise ValueError(name)
 
 
-def sync_view(view: View, entries: list[cache.GgufEntry], execute: bool) -> tuple[Plan, st.State]:
+def _check_root(view: View) -> None:
+    """A view root the user has not created is not ours to create: sync skips it.
+
+    Creating it would turn a typo, or a drive that failed to mount, into an empty
+    view that the next run happily fills - or, worse, a view whose real contents
+    are elsewhere and whose state file is therefore missing.
+    """
+    if not view.root.is_dir():
+        raise MissingRoot(f"[{view.name}] skipped: root does not exist: {view.root}")
+
+
+def _mass_removal(plan: Plan, state: st.State) -> int | None:
+    """The number of owned entries when the plan removes every single one, else None."""
+    if not state.owned:
+        return None
+    removed = {a.key for a in plan.actions if a.kind in ("prune", "tombstone")}
+    return len(state.owned) if set(state.owned) <= removed else None
+
+
+def sync_view(view: View, entries: list[cache.GgufEntry], execute: bool,
+              allow_mass_removal: bool = False) -> tuple[Plan, st.State]:
+    _check_root(view)
     state = st.load(view.root)
     desired = view.desired(entries)
     presence = {k: view.present(d) for k, d in desired.items()}
     plan = reconcile(desired, presence, state)
     if execute:
-        view.root.mkdir(parents=True, exist_ok=True)
+        n = _mass_removal(plan, state)
+        if n is not None and not allow_mass_removal:
+            raise MassRemoval(f"[{view.name}] refused: plan would remove every owned entry ({n}); "
+                              f"pass --allow-mass-removal if this is intended")
         state = apply(plan, view, state, execute=True, desired=desired)
         st.save(view.root, state)
     return plan, state
+
+
+def _cache_present(out: Out) -> bool:
+    """False, with a notice, when the HF cache directory is not there at all.
+
+    An absent cache scans as zero entries, which is indistinguishable from a cache
+    the user emptied: every owned entry would be pruned out of every view.
+    """
+    hub = hub_dir()
+    if not hub.is_dir():
+        out(f"[cache] not found: {hub}; nothing done")
+        return False
+    return True
+
+
+def _cached_as_missing(cache_file: Path) -> bool:
+    """True when the cached registry response is the `missing` (404) marker."""
+    try:
+        data = json.loads(cache_file.read_text())
+    except (OSError, ValueError):
+        return False
+    return bool(isinstance(data, dict) and data.get("missing"))
 
 
 def _abort(view: View, e: Exception, out: Out) -> None:
@@ -72,17 +131,21 @@ def _load_state(view: View, out: Out) -> st.State | None:
         return None
 
 
-def _report(view: View, plan: Plan, execute: bool, out: Out) -> None:
+def _report(view: View, plan: Plan, execute: bool, out: Out, mark: str = "") -> None:
     mode = "applied" if execute else "dry run"
     summary = ", ".join(f"{k}={v}" for k, v in sorted(plan.summary().items()))
     out(f"[{view.name}] {mode}: " + (summary or "nothing"))
     for a in plan.changes():
-        out(f"  {a.kind:<9} {a.key}" + (f"  ({a.note})" if a.note else ""))
+        lead = "* " if mark and a.key == mark else "  "
+        out(f"{lead}{a.kind:<9} {a.key}" + (f"  ({a.note})" if a.note else ""))
     for w in getattr(view, "warnings", []):
         out(f"  warning   {w}")
 
 
-def run(config: cfg.Config, view_names: list[str], execute: bool, offline: bool, out: Out = print) -> dict[str, Plan]:
+def run(config: cfg.Config, view_names: list[str], execute: bool, offline: bool, out: Out = print,
+        allow_mass_removal: bool = False) -> dict[str, Plan]:
+    if not _cache_present(out):
+        return {}
     entries = cache.scan(hub_dir())
     plans: dict[str, Plan] = {}
     for name in view_names:
@@ -91,9 +154,12 @@ def run(config: cfg.Config, view_names: list[str], execute: bool, offline: bool,
             out(f"[{name}] skipped: no root configured in {config.path}")
             continue
         try:
-            plan, _ = sync_view(view, entries, execute)
+            plan, _ = sync_view(view, entries, execute, allow_mass_removal)
         except (st.StateError, PermissionError) as e:
             _abort(view, e, out)
+            continue
+        except ViewSkipped as e:
+            out(str(e))
             continue
         plans[name] = plan
         _report(view, plan, execute, out)
@@ -107,6 +173,11 @@ def status(config: cfg.Config, view_names: list[str], out: Out = print) -> None:
         view = build_view(name, config, offline=True)
         if view is None:
             out(f"[{name}] no root configured")
+            continue
+        try:
+            _check_root(view)
+        except ViewSkipped as e:
+            out(str(e))
             continue
         state = _load_state(view, out)
         if state is None:
@@ -132,10 +203,17 @@ def status(config: cfg.Config, view_names: list[str], out: Out = print) -> None:
 
 
 def view_add(config: cfg.Config, key: str, view_names: list[str], execute: bool, out: Out = print) -> None:
+    if not _cache_present(out):
+        return
     entries = cache.scan(hub_dir())
     for name in view_names:
         view = build_view(name, config)
         if view is None:
+            continue
+        try:
+            _check_root(view)
+        except ViewSkipped as e:
+            out(str(e))
             continue
         state = _load_state(view, out)
         if state is None:
@@ -154,19 +232,29 @@ def view_add(config: cfg.Config, key: str, view_names: list[str], execute: bool,
             # explicit `view add` is the user asking for a fresh registry lookup.
             if execute and hasattr(view, "_registry_cache"):
                 cache_file = view._registry_cache(desired[key])
-                if cache_file.is_file() and "missing" in cache_file.read_text():
+                if cache_file.is_file() and _cached_as_missing(cache_file):
                     cache_file.unlink()
             plan, _ = sync_view(view, entries, execute)
         except (st.StateError, PermissionError) as e:
             _abort(view, e, out)
             continue
-        _report(view, Plan([a for a in plan.actions if a.key == key]), execute, out)
+        except ViewSkipped as e:
+            out(str(e))
+            continue
+        # `view add` syncs the whole view, so the whole plan is reported; the
+        # requested key's line is starred to separate it from the rest.
+        _report(view, plan, execute, out, mark=key)
 
 
 def view_remove(config: cfg.Config, key: str, view_names: list[str], execute: bool, out: Out = print) -> None:
     for name in view_names:
         view = build_view(name, config)
         if view is None:
+            continue
+        try:
+            _check_root(view)
+        except ViewSkipped as e:
+            out(str(e))
             continue
         state = _load_state(view, out)
         if state is None:

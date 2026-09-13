@@ -142,8 +142,10 @@ Rules:
   snapshot wins, else the newest snapshot directory.
 - Blobs with no snapshot link are returned separately by
   `unlinked(hub_dir) -> list[(repo_id, blob)]` for `view status`.
-- Sharded quants group via `hfu.group_quants`; the group's first shard is the
-  key entry and carries `shards: list[GgufEntry]`.
+- Sharded quants are not grouped: each shard is its own entry with
+  `is_shard = True`. The LM Studio view links every shard beside its siblings
+  (deleting one shard tombstones only that shard); the Ollama view skips shards
+  with a warning because Ollama does not load split GGUFs.
 - `mmproj_for(entry, entries) -> GgufEntry | None` uses `hfu.pick_mmproj`
   (F16 > BF16 > F32) among mmproj entries of the same repo.
 - Read-only. Nothing in this module writes.

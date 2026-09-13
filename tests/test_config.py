@@ -47,3 +47,61 @@ def test_dump_roundtrips(tmp_path: Path):
     again = cfg.load(p)
     assert again.views["ollama"].aliases["llama3.1:8b"] == "ollama/llama3.1:llama3.1-8b.gguf"
     assert again.views["lmstudio"].root == Path("~/lm").expanduser()
+
+
+HAND_WRITTEN = '''# my hfhub config
+[views.lmstudio]
+root = "~/lm"      # trailing comment
+
+[views.ollama]
+root = "/data/ollama"
+unknown_key = 3
+
+[views.ollama.aliases]
+"qwen3.6:27b" = "unsloth/Qwen3.6-27B-GGUF:Qwen3.6-27B-UD-Q4_K_XL.gguf"
+
+[other]
+keep = "me"
+'''
+
+
+def test_add_alias_preserves_the_rest_of_the_file(tmp_path: Path):
+    p = tmp_path / "config.toml"
+    p.write_text(HAND_WRITTEN)
+    c = cfg.load(p)
+    cfg.add_alias(c, "ollama", "llama3.1:8b", "ollama/llama3.1:llama3.1-8b.gguf")
+    text = p.read_text()
+    assert "# my hfhub config" in text
+    assert "[other]\nkeep = \"me\"" in text
+    assert "unknown_key = 3" in text
+    assert "root = \"~/lm\"      # trailing comment" in text
+    assert '"llama3.1:8b" = "ollama/llama3.1:llama3.1-8b.gguf"' in text
+    # inserted inside the aliases table, not after [other]
+    lines = text.splitlines()
+    assert lines.index('"llama3.1:8b" = "ollama/llama3.1:llama3.1-8b.gguf"') < lines.index("[other]")
+    again = cfg.load(p)
+    assert again.views["ollama"].aliases["llama3.1:8b"] == "ollama/llama3.1:llama3.1-8b.gguf"
+    assert again.views["ollama"].aliases["qwen3.6:27b"].startswith("unsloth/")
+    assert c.views["ollama"].aliases["llama3.1:8b"] == "ollama/llama3.1:llama3.1-8b.gguf"
+
+
+def test_add_alias_appends_a_table_when_there_is_none(tmp_path: Path):
+    p = tmp_path / "config.toml"
+    p.write_text('[views.ollama]\nroot = "/data/ollama"\n')
+    c = cfg.load(p)
+    cfg.add_alias(c, "ollama", "m:q4", "org/M-GGUF:M-Q4_K_M.gguf")
+    assert p.read_text() == ('[views.ollama]\nroot = "/data/ollama"\n\n'
+                             '[views.ollama.aliases]\n"m:q4" = "org/M-GGUF:M-Q4_K_M.gguf"\n')
+    assert cfg.load(p).views["ollama"].aliases == {"m:q4": "org/M-GGUF:M-Q4_K_M.gguf"}
+
+
+def test_add_alias_replaces_an_existing_line(tmp_path: Path):
+    p = tmp_path / "config.toml"
+    p.write_text(HAND_WRITTEN)
+    c = cfg.load(p)
+    cfg.add_alias(c, "ollama", "qwen3.6:27b", "other/Repo-GGUF:Repo-Q8_0.gguf")
+    text = p.read_text()
+    assert text.count('"qwen3.6:27b"') == 1
+    assert '"qwen3.6:27b" = "other/Repo-GGUF:Repo-Q8_0.gguf"' in text
+    assert "[other]" in text and "# my hfhub config" in text
+    assert cfg.load(p).views["ollama"].aliases == {"qwen3.6:27b": "other/Repo-GGUF:Repo-Q8_0.gguf"}

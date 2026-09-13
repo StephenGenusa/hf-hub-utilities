@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from hfhub import cache, config as cfg, state as st, sync
+from hfhub import cache, config as cfg, sync
 from hfhub.ollama_registry import MT_MODEL, MT_PROJECTOR
 from hfhub.views.base import ForeignItem
 from hfhub.views.ollama import REGISTRY_CACHE_DIR, blob_path
@@ -195,11 +195,15 @@ def run(config: cfg.Config, key: str, repo_id: str, view_names: list[str], move:
             f"adopted file lives in snapshot {plan.commit}")
     if view_name == "ollama":
         _seed_registry_cache(view.root, plan, item)
-        config.views["ollama"].aliases[_ollama_alias(key)] = f"{plan.repo_id}:{plan.relpath}"
-        cfg.save(config)
+        # A text edit, not a rewrite: the config file is the user's, comments included.
+        cfg.add_alias(config, "ollama", _ollama_alias(key), f"{plan.repo_id}:{plan.relpath}")
         view = sync.build_view(view_name, config)   # pick up the new alias
     entries = cache.scan(hub)
-    plan_, _ = sync.sync_view(view, entries, execute=True)
+    try:
+        plan_, _ = sync.sync_view(view, entries, execute=True)
+    except sync.ViewSkipped as e:
+        out(str(e))
+        return
     out(f"[{view_name}] synced: " + ", ".join(f"{k}={v}" for k, v in sorted(plan_.summary().items())))
     for w in getattr(view, "warnings", []):
         out(f"  warning   {w}")

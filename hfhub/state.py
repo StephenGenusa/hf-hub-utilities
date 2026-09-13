@@ -39,8 +39,26 @@ def load(root: Path) -> State:
         raise StateError(f"{p}: unreadable state file ({e}); move it aside to continue") from e
     if not isinstance(data, dict) or data.get("version") != 1:
         raise StateError(f"{p}: unsupported state version {data.get('version') if isinstance(data, dict) else '?'}")
-    owned = {k: Owned(paths=list(v["paths"]), sha256=v["sha256"]) for k, v in data.get("owned", {}).items()}
-    return State(owned=owned, tombstones=dict(data.get("tombstones", {})))
+    raw_owned = data.get("owned", {})
+    if not isinstance(raw_owned, dict):
+        raise StateError(f"{p}: malformed state file (owned must be an object)")
+    owned: dict[str, Owned] = {}
+    for k, v in raw_owned.items():
+        if not isinstance(v, dict):
+            raise StateError(f"{p}: malformed state file (owned[{k!r}] must be an object)")
+        paths = v.get("paths")
+        if not isinstance(paths, list) or not all(isinstance(x, str) for x in paths):
+            raise StateError(f"{p}: malformed state file (owned[{k!r}].paths must be a list of strings)")
+        sha256 = v.get("sha256")
+        if not isinstance(sha256, str):
+            raise StateError(f"{p}: malformed state file (owned[{k!r}].sha256 must be a string)")
+        owned[k] = Owned(paths=list(paths), sha256=sha256)
+    raw_tombstones = data.get("tombstones", {})
+    if not isinstance(raw_tombstones, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in raw_tombstones.items()
+    ):
+        raise StateError(f"{p}: malformed state file (tombstones must be an object of string to string)")
+    return State(owned=owned, tombstones=dict(raw_tombstones))
 
 
 def save(root: Path, state: State) -> None:

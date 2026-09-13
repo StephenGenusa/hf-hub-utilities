@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
 from pathlib import Path
 
 from hfhub import ollama_registry as reg
@@ -141,6 +142,18 @@ class OllamaView:
     def _config_cache(self, d: Desired) -> Path:
         return self.root / REGISTRY_CACHE_DIR / d.extra["repo_id"] / (d.extra["filename"] + ".config.json")
 
+    def _fetch(self, fn, *args):
+        """Call a registry fetch, turning a network outage into a skip.
+
+        A transient outage must not abort the whole sync run: the entry is left
+        for the next run instead. A missing blob (FileNotFoundError) is an OSError
+        too and is skipped the same way - we cannot build a manifest without it.
+        """
+        try:
+            return fn(*args, token=self.token)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise SkipEntry(f"registry unreachable: {e}") from e
+
     def _registry_manifest(self, d: Desired) -> dict | None:
         cache_file = self._registry_cache(d)
         if cache_file.is_file():
@@ -149,7 +162,7 @@ class OllamaView:
         if self.offline:
             raise SkipEntry("offline and no cached registry response")
         org, name = d.extra["repo_id"].split("/", 1)
-        m = self._fetch_manifest(org, name, d.extra["filename"], token=self.token)
+        m = self._fetch(self._fetch_manifest, org, name, d.extra["filename"])
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(json.dumps(m if m is not None else {"missing": True}))
         return m
@@ -178,11 +191,11 @@ class OllamaView:
         if cache_file.is_file():
             raw = cache_file.read_bytes()
         else:
-            raw = self._fetch_blob(org, name, registry["config"]["digest"], token=self.token) or b"{}"
+            raw = self._fetch(self._fetch_blob, org, name, registry["config"]["digest"]) or b"{}"
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             cache_file.write_bytes(raw)
         for layer in missing:
-            self._write_blob(layer["digest"][7:], self._fetch_blob(org, name, layer["digest"], token=self.token))
+            self._write_blob(layer["digest"][7:], self._fetch(self._fetch_blob, org, name, layer["digest"]))
         return json.loads(raw or b"{}"), [blob_path(l["digest"][7:]) for l in layers]
 
     def _alias_action(self, d: Desired, alias: str, text: str) -> str:

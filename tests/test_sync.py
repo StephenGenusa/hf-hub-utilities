@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from hfhub import config as cfg, state as st, sync
-from hfhub.views.base import Presence
 from tests.hub_fixture import add_repo
 from tests.test_ollama import gguf_bytes, FIX
 
@@ -85,3 +84,32 @@ def test_status_reports_sections(tmp_path, monkeypatch, capsys):
     sync.status(c, ["lmstudio"], out=lines.append)
     text = "\n".join(lines)
     assert "owned: 1" in text and "lmstudio:x/y/real.gguf" in text
+
+
+def test_status_skips_a_view_with_a_corrupt_state_file(tmp_path, monkeypatch):
+    hub, c = make(tmp_path, monkeypatch)
+    (tmp_path / "lm").mkdir()
+    (tmp_path / "lm" / st.STATE_FILE).write_text("{ not json")
+    lines = []
+    sync.status(c, ["lmstudio", "ollama"], out=lines.append)
+    text = "\n".join(lines)
+    assert "[lmstudio] aborted:" in text and "unreadable state file" in text
+    assert "[ollama] root=" in text and "desired: 1" in text
+
+
+def test_view_remove_on_corrupt_state_reports_and_continues(tmp_path, monkeypatch):
+    hub, c = make(tmp_path, monkeypatch)
+    (tmp_path / "lm").mkdir()
+    (tmp_path / "lm" / st.STATE_FILE).write_text("{ not json")
+    lines = []
+    sync.view_remove(c, "org/M-GGUF:M-Q4_K_M.gguf", ["lmstudio"], execute=True, out=lines.append)
+    assert any("[lmstudio] aborted:" in m for m in lines)
+
+
+def test_view_add_on_corrupt_state_reports_and_continues(tmp_path, monkeypatch):
+    hub, c = make(tmp_path, monkeypatch)
+    (tmp_path / "lm").mkdir()
+    (tmp_path / "lm" / st.STATE_FILE).write_text("{ not json")
+    lines = []
+    sync.view_add(c, "org/M-GGUF:M-Q4_K_M.gguf", ["lmstudio"], execute=True, out=lines.append)
+    assert any("[lmstudio] aborted:" in m for m in lines)

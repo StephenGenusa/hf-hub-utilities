@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from hfhub import cache, config as cfg, ollama_registry as reg, state as st
-from hfhub.views.base import Plan, Presence, View, apply, reconcile
+from hfhub.views.base import Plan, View, apply, reconcile
 from hfhub.views.lmstudio import LmStudioView
 from hfhub.views.ollama import OllamaView
 from hfhub.xfer import resolve_cache_dir
@@ -53,6 +54,24 @@ def sync_view(view: View, entries: list[cache.GgufEntry], execute: bool) -> tupl
     return plan, state
 
 
+def _abort(view: View, e: Exception, out: Out) -> None:
+    detail = f"permission denied ({e})" if isinstance(e, PermissionError) else str(e)
+    out(f"[{view.name}] aborted: {detail}")
+
+
+def _load_state(view: View, out: Out) -> st.State | None:
+    """The view's state, or None after reporting why this view has to be skipped.
+
+    A corrupt state file or an unreadable root is a problem with one view, not
+    with the run: every entry point reports it and moves on to the next view.
+    """
+    try:
+        return st.load(view.root)
+    except (st.StateError, PermissionError) as e:
+        _abort(view, e, out)
+        return None
+
+
 def _report(view: View, plan: Plan, execute: bool, out: Out) -> None:
     mode = "applied" if execute else "dry run"
     summary = ", ".join(f"{k}={v}" for k, v in sorted(plan.summary().items()))
@@ -73,11 +92,8 @@ def run(config: cfg.Config, view_names: list[str], execute: bool, offline: bool,
             continue
         try:
             plan, _ = sync_view(view, entries, execute)
-        except st.StateError as e:
-            out(f"[{name}] aborted: {e}")
-            continue
-        except PermissionError as e:
-            out(f"[{name}] aborted: permission denied ({e})")
+        except (st.StateError, PermissionError) as e:
+            _abort(view, e, out)
             continue
         plans[name] = plan
         _report(view, plan, execute, out)
@@ -92,10 +108,16 @@ def status(config: cfg.Config, view_names: list[str], out: Out = print) -> None:
         if view is None:
             out(f"[{name}] no root configured")
             continue
-        state = st.load(view.root)
-        desired = view.desired(entries)
+        state = _load_state(view, out)
+        if state is None:
+            continue
+        try:
+            desired = view.desired(entries)
+            foreign = view.foreign(state)
+        except PermissionError as e:
+            _abort(view, e, out)
+            continue
         missing = [k for k in state.tombstones]
-        foreign = view.foreign(state)
         out(f"[{name}] root={view.root}")
         out(f"  owned: {len(state.owned)}   desired: {len(desired)}   tombstoned: {len(missing)}   foreign: {len(foreign)}")
         for k in missing:
@@ -115,23 +137,29 @@ def view_add(config: cfg.Config, key: str, view_names: list[str], execute: bool,
         view = build_view(name, config)
         if view is None:
             continue
-        state = st.load(view.root)
-        if key in state.tombstones:
-            out(f"[{name}] clearing tombstone for {key}")
-            if execute:
-                del state.tombstones[key]
-                st.save(view.root, state)
-        desired = view.desired(entries)
-        if key not in desired:
-            out(f"[{name}] {key} is not in the cache; nothing to add")
+        state = _load_state(view, out)
+        if state is None:
             continue
-        # A cached 404 would keep us on the synthesised manifest forever; an
-        # explicit `view add` is the user asking for a fresh registry lookup.
-        if execute and hasattr(view, "_registry_cache"):
-            cache_file = view._registry_cache(desired[key])
-            if cache_file.is_file() and "missing" in cache_file.read_text():
-                cache_file.unlink()
-        plan, _ = sync_view(view, entries, execute)
+        try:
+            if key in state.tombstones:
+                out(f"[{name}] clearing tombstone for {key}")
+                if execute:
+                    del state.tombstones[key]
+                    st.save(view.root, state)
+            desired = view.desired(entries)
+            if key not in desired:
+                out(f"[{name}] {key} is not in the cache; nothing to add")
+                continue
+            # A cached 404 would keep us on the synthesised manifest forever; an
+            # explicit `view add` is the user asking for a fresh registry lookup.
+            if execute and hasattr(view, "_registry_cache"):
+                cache_file = view._registry_cache(desired[key])
+                if cache_file.is_file() and "missing" in cache_file.read_text():
+                    cache_file.unlink()
+            plan, _ = sync_view(view, entries, execute)
+        except (st.StateError, PermissionError) as e:
+            _abort(view, e, out)
+            continue
         _report(view, Plan([a for a in plan.actions if a.key == key]), execute, out)
 
 
@@ -140,7 +168,9 @@ def view_remove(config: cfg.Config, key: str, view_names: list[str], execute: bo
         view = build_view(name, config)
         if view is None:
             continue
-        state = st.load(view.root)
+        state = _load_state(view, out)
+        if state is None:
+            continue
         owned = state.owned.get(key)
         if owned is None:
             out(f"[{name}] {key} is not owned by sync")
@@ -149,8 +179,11 @@ def view_remove(config: cfg.Config, key: str, view_names: list[str], execute: bo
         paths = [p for p in owned.paths if p not in others]
         out(f"[{name}] remove {key}: " + ", ".join(paths))
         if execute:
-            view.remove(paths)
-            del state.owned[key]
-            from datetime import datetime
-            state.tombstones[key] = datetime.now().replace(microsecond=0).isoformat()
-            st.save(view.root, state)
+            try:
+                view.remove(paths)
+                del state.owned[key]
+                state.tombstones[key] = datetime.now().replace(microsecond=0).isoformat()
+                st.save(view.root, state)
+            except PermissionError as e:
+                _abort(view, e, out)
+                continue

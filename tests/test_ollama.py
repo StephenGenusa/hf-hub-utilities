@@ -108,6 +108,24 @@ def test_offline_without_cached_response_skips(tmp_path: Path):
     assert not (view.root / "blobs").exists()  # skipped before anything was written
 
 
+def test_registry_outage_skips_and_writes_nothing(tmp_path: Path):
+    import urllib.error
+
+    hub, entries, view, calls = make(tmp_path)
+
+    def down(*a, **k):
+        raise urllib.error.URLError("down")
+
+    view._fetch_manifest = down
+    (d,) = view.desired(entries).values()
+    try:
+        view.create(d)
+        assert False, "expected SkipEntry"
+    except SkipEntry as e:
+        assert "registry unreachable" in str(e)
+    assert not view.root.exists()  # skipped before anything was written
+
+
 def test_offline_with_full_cache_creates_without_network(tmp_path: Path):
     hub, entries, view, calls = two_models(tmp_path)
     desired = view.desired(entries)

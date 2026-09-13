@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from hfhub.state import Owned, State
 from hfhub.views import base
 from hfhub.views.base import Desired, Presence, SkipEntry
@@ -67,8 +69,9 @@ def test_apply_dry_run_writes_nothing():
 
 def test_apply_execute_creates_and_records_paths():
     v = FakeView()
-    plan = base.reconcile({"k": d("k")}, {"k": Presence.ABSENT}, State())
-    state = base.apply(plan, v, State(), execute=True)
+    desired = {"k": d("k")}
+    plan = base.reconcile(desired, {"k": Presence.ABSENT}, State())
+    state = base.apply(plan, v, State(), execute=True, desired=desired)
     assert v.created == ["k"]
     assert state.owned["k"].paths == ["k.gguf", "shared/small"]
 
@@ -76,8 +79,9 @@ def test_apply_execute_creates_and_records_paths():
 def test_apply_prune_keeps_paths_owned_by_others():
     v = FakeView()
     state = State(owned={"a": Owned(["a.gguf", "shared/small"], "s"), "b": Owned(["b.gguf", "shared/small"], "s")})
-    plan = base.reconcile({"b": d("b")}, {"b": Presence.CORRECT}, state)
-    state = base.apply(plan, v, state, execute=True)
+    desired = {"b": d("b")}
+    plan = base.reconcile(desired, {"b": Presence.CORRECT}, state)
+    state = base.apply(plan, v, state, execute=True, desired=desired)
     assert v.removed == ["a.gguf"]
     assert "a" not in state.owned and "b" in state.owned
 
@@ -85,15 +89,24 @@ def test_apply_prune_keeps_paths_owned_by_others():
 def test_apply_tombstone_records_timestamp():
     v = FakeView()
     state = State(owned={"k": Owned(["k.gguf"], "s")})
-    plan = base.reconcile({"k": d("k")}, {"k": Presence.ABSENT}, state)
-    state = base.apply(plan, v, state, execute=True)
+    desired = {"k": d("k")}
+    plan = base.reconcile(desired, {"k": Presence.ABSENT}, state)
+    state = base.apply(plan, v, state, execute=True, desired=desired)
     assert "k" not in state.owned and "k" in state.tombstones
 
 
 def test_apply_skip_on_create_failure_leaves_state_clean():
     v = FakeView()
     v.fail.add("k")
-    plan = base.reconcile({"k": d("k")}, {"k": Presence.ABSENT}, State())
-    state = base.apply(plan, v, State(), execute=True)
+    desired = {"k": d("k")}
+    plan = base.reconcile(desired, {"k": Presence.ABSENT}, State())
+    state = base.apply(plan, v, State(), execute=True, desired=desired)
     assert state.owned == {}
     assert [a.kind for a in plan.actions] == ["skip"]
+
+
+def test_apply_create_without_desired_raises():
+    v = FakeView()
+    plan = base.reconcile({"k": d("k")}, {"k": Presence.ABSENT}, State())
+    with pytest.raises(ValueError):
+        base.apply(plan, v, State(), execute=True)

@@ -103,7 +103,9 @@ def apply(plan: Plan, view: View, state: State, execute: bool, desired: dict[str
     desired = desired or {}
     for a in plan.actions:
         if a.kind == "create":
-            d = desired.get(a.key) or Desired(a.key, "", {p: Path() for p in a.paths})
+            d = desired.get(a.key)
+            if d is None:
+                raise ValueError(f"apply: no Desired for create action {a.key!r}; pass desired=")
             try:
                 paths = view.create(d)
             except SkipEntry as e:
@@ -112,7 +114,9 @@ def apply(plan: Plan, view: View, state: State, execute: bool, desired: dict[str
             state.owned[a.key] = Owned(paths=sorted(set(paths)), sha256=d.sha256)
         elif a.kind == "adopt":
             d = desired.get(a.key)
-            state.owned[a.key] = Owned(paths=list(a.paths), sha256=d.sha256 if d else "")
+            if d is None:
+                raise ValueError(f"apply: no Desired for adopt action {a.key!r}; pass desired=")
+            state.owned[a.key] = Owned(paths=list(a.paths), sha256=d.sha256)
         elif a.kind == "tombstone":
             state.owned.pop(a.key, None)
             state.tombstones[a.key] = datetime.now().replace(microsecond=0).isoformat()

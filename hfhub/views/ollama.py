@@ -259,14 +259,18 @@ class OllamaView:
             p.unlink()
         remove_empty_parents(self.root, p)
 
-    def _referenced_digests(self) -> set[str]:
-        """Every digest any manifest still on disk points at (config + layers)."""
+    def _referenced_digests(self, exclude: Path | None = None) -> set[str]:
+        """Every digest any manifest still on disk points at (config + layers).
+
+        `exclude` skips one manifest file: the caller is about to delete it and
+        wants to know what nothing *else* refers to any more.
+        """
         out: set[str] = set()
         mroot = self.root / "manifests"
         if not mroot.is_dir():
             return out
         for p in mroot.rglob("*"):
-            if not p.is_file():
+            if not p.is_file() or p == exclude:
                 continue
             try:
                 m = json.loads(p.read_text())

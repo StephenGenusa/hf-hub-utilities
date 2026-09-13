@@ -50,6 +50,20 @@ def _foreign_filename(item: ForeignItem) -> str:
     return os.path.basename(item.path)
 
 
+def _ollama_alias(key: str) -> str:
+    """The Ollama name the key was pulled under: `ollama:<registry>/<ns>/<name>:<tag>`.
+
+    The namespace has to survive: dropping it turns `myorg/mymodel:8b` into
+    `library/mymodel/8b` on disk, which is a different model as far as Ollama is
+    concerned, and the name the user has been typing stops resolving.
+    """
+    parts = key.removeprefix("ollama:").split("/")[1:]   # drop the registry host
+    name, _, tag = parts[-1].partition(":")
+    ns = parts[:-1]
+    full = "/".join(ns + [name]) if ns != ["library"] else name
+    return f"{full}:{tag}" if tag else full
+
+
 def plan_adopt(item: ForeignItem, repo_id: str, sha256: str,
                hub: Callable[[str], RepoMap | None] | None = None) -> AdoptPlan:
     """Where this file would land in the cache: Hub-verified when the Hub knows the hash.
@@ -73,16 +87,27 @@ def plan_adopt(item: ForeignItem, repo_id: str, sha256: str,
 
 
 def execute_adopt(item: ForeignItem, plan: AdoptPlan, hub_dir: Path, move: bool) -> Path:
-    """Put the file in the cache as blob + snapshot symlink + refs/main."""
+    """Put the file in the cache as blob + snapshot symlink (+ refs/main when free).
+
+    refs/main is never moved off a revision that is already there: it may be the
+    real Hub revision of a repo we are only adding one loose file to, and a
+    redownload updates that snapshot, not ours. `cache.scan` walks every snapshot,
+    so the adopted file is found either way - just not flagged `is_current`.
+    """
     repo_root = hub_dir / cache.repo_folder(plan.repo_id)
     blob = repo_root / "blobs" / plan.etag
     _place_file(item.path, blob, "move" if move else "copy")
     snap = repo_root / "snapshots" / plan.commit / plan.relpath
     snap.parent.mkdir(parents=True, exist_ok=True)
-    if not snap.is_symlink():
-        snap.symlink_to(_rel_symlink_target(blob, snap))
+    target = _rel_symlink_target(blob, snap)
+    if not (snap.is_symlink() and os.readlink(snap) == target):
+        if snap.is_symlink() or snap.exists():
+            snap.unlink()
+        snap.symlink_to(target)
     (repo_root / "refs").mkdir(exist_ok=True)
-    (repo_root / "refs" / "main").write_text(plan.commit)
+    main = repo_root / "refs" / "main"
+    if not main.is_file() or main.read_text().strip() == plan.commit:
+        main.write_text(plan.commit)
     return snap
 
 
@@ -100,16 +125,22 @@ def find_foreign(config: cfg.Config, view_names: list[str], out: Out = print) ->
     return items
 
 
-def _config_bytes(view_root: Path, item: ForeignItem) -> bytes:
-    """The foreign manifest's config blob, so create() need not fetch one."""
+def _config_digest(view_root: Path, item: ForeignItem) -> str | None:
+    """The digest of the foreign manifest's config blob, read from the manifest."""
     try:
         m = json.loads((view_root / item.extra["manifest"]).read_text())
-        digest = m["config"]["digest"].removeprefix("sha256:")
-    except (KeyError, OSError, TypeError, ValueError):
+        return m["config"]["digest"].removeprefix("sha256:")
+    except (AttributeError, KeyError, OSError, TypeError, ValueError):
+        return None
+
+
+def _config_bytes(view_root: Path, item: ForeignItem) -> bytes:
+    """The foreign manifest's config blob, so create() need not fetch one."""
+    digest = _config_digest(view_root, item)
+    if digest is None:
         return b"{}"
-    p = view_root / blob_path(digest)
     try:
-        return p.read_bytes()
+        return (view_root / blob_path(digest)).read_bytes()
     except OSError:
         return b"{}"
 
@@ -120,16 +151,17 @@ def _seed_registry_cache(view_root: Path, plan: AdoptPlan, item: ForeignItem) ->
     Both halves of the view's registry cache are written: without the config blob
     the next sync would go to huggingface.co for a repo that is usually not there,
     and the entry would be skipped instead of built from what Ollama already had.
+    A model with nothing but a model layer gets the `missing` marker instead, which
+    sends create() straight to the synthesised manifest - still no network.
     """
     layers = [l for l in item.extra.get("layers", []) if l["mediaType"] not in (MT_MODEL, MT_PROJECTOR)]
-    if not layers:
-        return
     fake = {"schemaVersion": 2, "config": {"digest": "sha256:" + "0" * 64, "size": 0},
             "layers": [{"digest": "sha256:" + plan.etag, "mediaType": MT_MODEL, "size": 0}] + layers}
     base = view_root / REGISTRY_CACHE_DIR / plan.repo_id
     base.mkdir(parents=True, exist_ok=True)
-    (base / (plan.relpath + ".json")).write_text(json.dumps(fake))
-    (base / (plan.relpath + ".config.json")).write_bytes(_config_bytes(view_root, item))
+    name = os.path.basename(plan.relpath)       # matches OllamaView._registry_cache
+    (base / (name + ".json")).write_text(json.dumps(fake if layers else {"missing": True}))
+    (base / (name + ".config.json")).write_bytes(_config_bytes(view_root, item))
 
 
 def run(config: cfg.Config, key: str, repo_id: str, view_names: list[str], move: bool, execute: bool,
@@ -139,49 +171,41 @@ def run(config: cfg.Config, key: str, repo_id: str, view_names: list[str], move:
         out(f"no foreign item with key {key}")
         return
     view_name, item = match[0]
-    sha = item.path.name[len("sha256-"):] if item.path.name.startswith("sha256-") else file_sha256(item.path)
+    if item.path.name.startswith("sha256-"):
+        sha = item.path.name[len("sha256-"):]
+    else:
+        out(f"hashing {item.path} ...")
+        sha = file_sha256(item.path)
     plan = plan_adopt(item, repo_id, sha)
     out(f"adopt {key} -> {plan.repo_id}:{plan.relpath} ({'hub-backed' if plan.hub_backed else plan.note})")
     if not execute:
         return
     hub = sync.hub_dir()
     view = sync.build_view(view_name, config)
+    # Move the file first: everything after it is repairable by re-running, while
+    # a config alias or a rewritten manifest pointing at a file we never adopted
+    # is not. Nothing the foreign side already has is destroyed here - the old
+    # Ollama manifest stays put and is overwritten in place by the sync below,
+    # which is what makes it an owned alias rather than a leftover.
+    execute_adopt(item, plan, hub, move)
+    main = hub / cache.repo_folder(plan.repo_id) / "refs" / "main"
+    current = main.read_text().strip() if main.is_file() else plan.commit
+    if current != plan.commit:
+        out(f"refs/main left at {current} (real Hub revision); "
+            f"adopted file lives in snapshot {plan.commit}")
     if view_name == "ollama":
-        # Seed the registry cache before the old manifest goes: it is the only
-        # record of the template/params layers this model was published with.
         _seed_registry_cache(view.root, plan, item)
-        name_tag = key.split("/")[-1]
-        config.views["ollama"].aliases[name_tag] = f"{plan.repo_id}:{plan.relpath}"
+        config.views["ollama"].aliases[_ollama_alias(key)] = f"{plan.repo_id}:{plan.relpath}"
         cfg.save(config)
         view = sync.build_view(view_name, config)   # pick up the new alias
-        old_manifest = view.root / item.extra["manifest"]
-        if old_manifest.exists():
-            old_manifest.unlink()
-    execute_adopt(item, plan, hub, move)
     entries = cache.scan(hub)
     plan_, _ = sync.sync_view(view, entries, execute=True)
     out(f"[{view_name}] synced: " + ", ".join(f"{k}={v}" for k, v in sorted(plan_.summary().items())))
-
-
-def _referenced_elsewhere(view_root: Path, manifest: Path) -> set[str]:
-    """Every digest any manifest other than `manifest` still points at."""
-    referenced: set[str] = set()
-    mroot = view_root / "manifests"
-    if not mroot.is_dir():
-        return referenced
-    for p in mroot.rglob("*"):
-        if not p.is_file() or p == manifest:
-            continue
-        try:
-            m = json.loads(p.read_text())
-            digests = [l["digest"] for l in m["layers"]]
-        except (OSError, TypeError, ValueError, KeyError):
-            continue
-        config = m.get("config") if isinstance(m, dict) else None
-        if isinstance(config, dict) and isinstance(config.get("digest"), str):
-            digests.append(config["digest"])
-        referenced.update(d.removeprefix("sha256:") for d in digests if isinstance(d, str))
-    return referenced
+    for w in getattr(view, "warnings", []):
+        out(f"  warning   {w}")
+    if view_name == "lmstudio" and not move:
+        out(f"  {item.path} was copied, not moved: it stays a real file and keeps showing up "
+            f"as foreign until you remove it or re-adopt with --move")
 
 
 def remove_foreign(config: cfg.Config, key: str, view_names: list[str], execute: bool, out: Out = print) -> None:
@@ -196,9 +220,12 @@ def remove_foreign(config: cfg.Config, key: str, view_names: list[str], execute:
     if view_name == "ollama":
         manifest = view.root / item.extra["manifest"]
         targets = [manifest]
-        referenced = _referenced_elsewhere(view.root, manifest)
-        for l in item.extra.get("layers", []):
-            digest = l["digest"].removeprefix("sha256:")
+        referenced = view._referenced_digests(exclude=manifest)
+        digests = [l["digest"].removeprefix("sha256:") for l in item.extra.get("layers", [])]
+        config_digest = _config_digest(view.root, item)
+        if config_digest is not None:
+            digests.append(config_digest)
+        for digest in dict.fromkeys(digests):
             if digest not in referenced:
                 targets.append(view.root / blob_path(digest))
     for t in targets:

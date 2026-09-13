@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "huggingfacehub"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.13"
 dependencies = [
     "huggingface-hub>=1.20",
@@ -11,8 +15,11 @@ dependencies = [
 dev = ["pytest"]
 
 [tool.setuptools]
-py-modules = ["hfu", "hf_xfer"]
+packages = ["hfhub", "hfhub.views"]
 
 [project.scripts]
-hfu = "hfu:main"
-hf-xfer = "hf_xfer:main"
+hfu = "hfhub.cli:hfu_main"
+hf-xfer = "hfhub.cli:xfer_main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -4,8 +4,8 @@ Two command-line tools for working with [Hugging Face Hub](https://huggingface.c
 
 | Tool | Purpose |
 |------|---------|
-| `hfu` | Download any Hub repo from a URL, path, or `org/name` shorthand. Don't make me think |
-| `hf-xfer` | Bidirectionally translate between a `--local-dir` flat copy and the shared hub cache |
+| `hfu` | Download any Hub repo from a URL, path, or `org/name` shorthand, then refresh the views |
+| `hf-xfer` | Translate between a `--local-dir` flat copy and the shared hub cache; maintain LM Studio and Ollama views |
 
 ---
 
@@ -206,6 +206,53 @@ hf-xfer export --local-dir ~/export/gemma --repo-id google/gemma-3-4b-it --hardl
 | Hardlink | `--hardlink` | 1× | Fastest; requires same filesystem |
 
 On export with `--move`, blobs shared by multiple snapshot revisions are automatically copied instead of moved to avoid breaking other revisions.
+
+---
+
+## Consumer views — LM Studio and Ollama
+
+The HF hub cache is the only place model bytes live. `hf-xfer sync` maintains two derived views of it:
+
+| View | What it writes |
+|------|----------------|
+| `lmstudio` | `<root>/<org>/<name>/<file>.gguf` symlinks into the cache (mmproj beside the weights) |
+| `ollama` | `<root>/blobs/sha256-<hash>` symlinks plus manifests under `manifests/hf.co/<org>/<name>/<tag>`, and alias manifests |
+
+Configure roots in `~/.config/hfhub/config.toml` (or `$HFHUB_CONFIG`):
+
+```toml
+[views.lmstudio]
+root = "~/.lmstudio/models"
+
+[views.ollama]
+root = "/path/to/huggingface/ollama"   # set OLLAMA_MODELS to the same path
+
+[views.ollama.aliases]
+"qwen3.6:27b" = "unsloth/Qwen3.6-27B-GGUF:Qwen3.6-27B-UD-Q4_K_XL.gguf"
+```
+
+```bash
+hf-xfer sync                 # dry run: what would change
+hf-xfer sync --execute       # write links and manifests
+hf-xfer view status          # owned / tombstoned / foreign per view, unlinked cache blobs
+hf-xfer view remove <org/name>:<file> --execute   # remove from views and remember it (tombstone)
+hf-xfer view add    <org/name>:<file> --execute   # bring it back
+hf-xfer view adopt  <foreign key> --repo-id <org/name> --move --execute   # move a foreign file into the cache
+hf-xfer dupes                # foreign files that look like a cache entry
+hf-xfer view remove --foreign <foreign key> --execute
+```
+
+Rules:
+
+- Dry run is the default. Nothing is written without `--execute`.
+- Deleting a model inside LM Studio or with `ollama rm` sticks: sync records a tombstone and does not recreate it.
+- Deleting only a secondary file (an alias manifest, a projector link, an mmproj link) is treated as damage and repaired on the next sync; deleting the primary file (the weight link in LM Studio, the `hf.co` manifest or model blob link in Ollama) is what records a tombstone.
+- Sync never deletes or overwrites anything it did not create. Files that appear in a view without HF backing are listed as *foreign*.
+- `view remove --foreign <key>` is the only command that deletes something sync did not create; for Ollama it removes the manifest and any blob no other manifest references, and it requires `--execute`.
+- Ollama manifests are built from `https://huggingface.co/v2/<org>/<name>/manifests/<file>` so templates and parameters match what `ollama pull hf.co/...` would produce, but the model layer always points at your local file, so cached files that are behind the Hub still work. The registry response and config are cached under `<root>/.hfhub-registry/`, so later `--offline` runs need no network for entries already seen; if the network is actually down, the affected entries are skipped with a notice rather than failing the run. Repos that do not exist on the Hub get a minimal manifest and rely on the chat template embedded in the GGUF.
+- `hfu` runs `sync --execute` after every successful download; pass `--no-sync` to skip.
+
+Ollama needs read access to the cache and write access to the view root. With Ollama running as its own user, put the view root on the same drive as the cache, `chgrp ollama` it, `chmod 2775`, and set `OLLAMA_MODELS` in a systemd override together with `RequiresMountsFor=<mount point>`.
 
 ---
 

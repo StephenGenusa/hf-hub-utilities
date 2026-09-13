@@ -62,13 +62,17 @@ hfhub/
   views/lmstudio.py   LmStudioView
   views/ollama.py     OllamaView (blob links, manifests, aliases)
   ollama_registry.py  HTTP client for huggingface.co/v2 manifests + blobs
+  gguf_header.py      stdlib GGUF header reader (KV + tensor info, no tensor data)
+  adopt.py            foreign -> HF cache import (Hub-verified or synthesised)
+  dupes.py            foreign vs cache matching by header
   xfer.py             existing import/export, moved verbatim
   hfu.py              existing downloader + post-download sync hook
   cli.py              argparse wiring for `hfu` and `hf-xfer`
 tests/
   test_hfu.py         existing (moved)
   test_cache.py, test_state.py, test_reconcile.py,
-  test_lmstudio.py, test_ollama.py, test_ollama_registry.py, test_cli.py
+  test_lmstudio.py, test_ollama.py, test_ollama_registry.py, test_cli.py,
+  test_gguf_header.py, test_adopt.py, test_dupes.py
 ```
 
 `pyproject.toml`: `[tool.setuptools] packages = ["hfhub", "hfhub.views"]`,
@@ -83,6 +87,9 @@ hf-xfer sync   [--view lmstudio|ollama] [--execute] [--offline]
 hf-xfer view add    <org/name>[:<relpath>] [--view …] [--execute]
 hf-xfer view remove <org/name>[:<relpath>] [--view …] [--execute]
 hf-xfer view status [--view …]
+hf-xfer view adopt  <key> --repo-id <org/name> [--view …] [--move] [--execute]
+hf-xfer view remove --foreign <key> [--view …] [--execute]
+hf-xfer dupes [--view …]
 hfu … [--no-sync]
 ```
 
@@ -287,8 +294,50 @@ but does not change hfu's exit code, since the download itself succeeded.
 6. Download the 11 missing models via `hfu`; sync happens automatically.
 7. Delete the old Ollama store on `/`.
 
+## Foreign files: listing, adoption, duplicates
+
+**Listing.** `view status` prints every foreign item with a stable key:
+
+- LM Studio: `lmstudio:<org>/<name>/<basename>` for each real `*.gguf` file
+  (symlinks that point outside the HF cache are also foreign).
+- Ollama: `ollama:<registry>/<ns>/<name>:<tag>` for each manifest whose model
+  layer is a real file (typically `registry.ollama.ai/library/...`).
+
+Each row shows size, GGUF `general.architecture`, parameter count, and
+`general.file_type` name read from the header (module `gguf_header.py`,
+stdlib-only reader of the KV section; never reads tensor data).
+
+**Adoption.** `view adopt <key> --repo-id <org/name> [--move]` moves or copies
+the bytes into the HF cache and re-syncs so the foreign file becomes a link:
+
+1. Query the Hub for `<org/name>`. If it exists and a file with the same
+   SHA-256 is in the current revision, import under that filename with the
+   real commit and etag, exactly as `hf-xfer import` does.
+2. Otherwise (repo missing, or hash not in the repo) synthesise: commit =
+   40-hex derived from `sha256(repo_id + sha256)[:40]`, etag = the file
+   SHA-256, filename = the foreign basename (for Ollama: `<name>-<tag>.gguf`).
+   Print a warning that the entry is not Hub-backed.
+3. Write blob, snapshot symlink, `refs/main` via the existing `execute_import`
+   machinery. `--move` renames when on the same filesystem, else copies then
+   unlinks; without `--move`, copy.
+4. For an Ollama registry model, add an alias `<name>:<tag>` to the config so
+   the old name keeps working, and carry over its template/params layers into
+   the new `hf.co`-style manifest.
+5. Run `sync` for the view.
+
+**Duplicates.** `hf-xfer dupes` matches each foreign item against cache
+entries using the GGUF header: same `general.architecture`, same
+`general.file_type`, and parameter count within 2 %. Parameter count is the
+sum of tensor element counts from the header's tensor-info section, which
+requires reading only the header. Matches are printed as
+`<foreign key>  ≈  <repo_id>:<relpath>  (<reason>)`, never acted on.
+`view remove --foreign <key>` deletes the named foreign item: for LM Studio
+the file (and its empty folder); for Ollama the manifest plus any blob no
+other manifest references. This is the only path that deletes something the
+manager did not create, and it requires the key to be spelled out.
+
 ## Out of scope
 
-- Importing Ollama registry models into the HF cache automatically.
+- Importing foreign files automatically; adoption is always an explicit command.
 - Watching the cache with a daemon.
 - Any change to the import/export behaviour of `hf-xfer`.

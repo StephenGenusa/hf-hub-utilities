@@ -242,7 +242,7 @@ def build_command(repo_id: str, repo_type: str, filenames: list[str], extra: lis
 
 
 _OWN_OPTIONS_WITH_VALUE = {"-q", "--quant", "--mmproj"}
-_OWN_FLAGS = {"-h", "--help"}
+_OWN_FLAGS = {"-h", "--help", "--no-sync"}
 
 
 def _split_own_args(argv: list[str]) -> tuple[list[str], list[str]]:
@@ -283,6 +283,8 @@ def parse_args(argv: list[str]):
                         help="quant to download (repeatable or comma-separated); skips the picker")
     parser.add_argument("--mmproj", default=None, metavar="MODE",
                         help="F16|BF16|F32|all|none (default: auto = F16 > BF16 > F32)")
+    parser.add_argument("--no-sync", action="store_true",
+                        help="don't refresh LM Studio / Ollama views after the download")
     own, extra = _split_own_args(argv)
     ns = parser.parse_args(own)
     ns.quant = [s for chunk in ns.quant for s in chunk.split(",") if s.strip()]
@@ -452,6 +454,12 @@ def main() -> None:
     try:
         subprocess.run(cmd, check=True, stdout=sys.stdout, stderr=sys.stderr)
         print("\n✅ Successfully downloaded")
+        if not ns.no_sync:
+            try:
+                from hfhub import config as _cfg, sync as _sync
+                _sync.run(_cfg.load(), list(_cfg.VIEW_NAMES), execute=True, offline=False)
+            except Exception as e:  # the download succeeded; a sync problem must not change the exit code
+                print(f"⚠️  view sync failed: {type(e).__name__}: {e}", file=sys.stderr)
     except subprocess.CalledProcessError as e:
         print(f"\n❌ Download failed with exit code {e.returncode}", file=sys.stderr)
         sys.exit(e.returncode)

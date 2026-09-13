@@ -5,6 +5,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
 from hfhub import ollama_registry as reg
@@ -87,7 +88,7 @@ class OllamaView:
                 links[blob_path(mm.sha256)] = mm.blob
             tag = tags[e.key]
             extra = {"tag": tag, "manifest": manifest_path(e.repo_id, tag), "repo_id": e.repo_id,
-                     "filename": e.basename, "model": (e.sha256, e.size),
+                     "filename": e.basename, "relpath": e.relpath, "model": (e.sha256, e.size),
                      "projector": (mm.sha256, mm.size) if mm else None, "blob": str(e.blob),
                      "aliases": [a for a, t in self.aliases.items() if t == e.key]}
             out[e.key] = Desired(key=e.key, sha256=e.sha256, links=links, extra=extra)
@@ -97,7 +98,11 @@ class OllamaView:
     def _link_status(self, rel: str, target: Path) -> str:
         p = self.root / rel
         if p.is_symlink():
-            return "ok" if os.readlink(p) == str(target) else "wrong"
+            current = os.readlink(p)
+            # The same bytes can live in several HF repos (identical mmproj or
+            # MTP files); the blob path is keyed by sha, so a link to any copy
+            # of the same sha is correct.
+            return "ok" if current == str(target) or os.path.basename(current) == target.name else "wrong"
         if p.is_file():
             return "ok"  # Ollama downloaded identical bytes; adopt
         return "missing"
@@ -162,7 +167,9 @@ class OllamaView:
         if self.offline:
             raise SkipEntry("offline and no cached registry response")
         org, name = d.extra["repo_id"].split("/", 1)
-        m = self._fetch(self._fetch_manifest, org, name, d.extra["filename"])
+        # The registry accepts a file path as the tag only when '/' is percent-encoded.
+        tag = urllib.parse.quote(d.extra.get("relpath", d.extra["filename"]), safe="")
+        m = self._fetch(self._fetch_manifest, org, name, tag)
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(json.dumps(m if m is not None else {"missing": True}))
         return m

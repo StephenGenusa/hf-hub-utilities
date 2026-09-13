@@ -281,3 +281,31 @@ def test_shards_are_skipped_with_warning(tmp_path: Path):
     view = OllamaView(tmp_path / "ol", aliases={}, fetch_manifest=lambda *a, **k: None, fetch_blob=lambda *a, **k: b"")
     assert view.desired(cache.scan(hub)) == {}
     assert any("shard" in w for w in view.warnings)
+
+
+def test_link_to_identical_blob_in_another_repo_is_ok(tmp_path: Path):
+    hub = tmp_path / "hub"
+    add_repo(hub, "a/r", {"m.gguf": gguf_bytes(tmp_path), "mmproj-F16.gguf": b"same"})
+    add_repo(hub, "b/r", {"m2.gguf": gguf_bytes(tmp_path, arch="llama"), "mmproj-F16.gguf": b"same"})
+    view = OllamaView(tmp_path / "ol", aliases={}, fetch_manifest=lambda *a, **k: None, fetch_blob=lambda *a, **k: b"")
+    desired = view.desired(cache.scan(hub))
+    a, b = desired["a/r:m.gguf"], desired["b/r:m2.gguf"]
+    view.create(a)
+    view.create(b)  # shared mmproj sha: the existing link points into repo a, not b
+    assert view.present(a) is Presence.CORRECT
+    assert view.present(b) is Presence.CORRECT
+
+
+def test_registry_tag_is_percent_encoded_relpath(tmp_path: Path):
+    hub = tmp_path / "hub"
+    add_repo(hub, "org/M-GGUF", {"sub/M-Q4_K_M.gguf": gguf_bytes(tmp_path)})
+    calls = []
+
+    def fm(org, name, tag, token=None, timeout=30):
+        calls.append(tag)
+        return None
+
+    view = OllamaView(tmp_path / "ol", aliases={}, fetch_manifest=fm, fetch_blob=lambda *a, **k: b"")
+    (d,) = view.desired(cache.scan(hub)).values()
+    view.create(d)
+    assert calls == ["sub%2FM-Q4_K_M.gguf"]

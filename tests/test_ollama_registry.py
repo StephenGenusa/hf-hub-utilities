@@ -64,3 +64,13 @@ def test_live_fetch_manifest_and_blob():
     blob = reg.fetch_blob("unsloth", "gemma-4-E2B-it-GGUF", t["digest"])
     assert len(blob) == t["size"]
     assert reg.fetch_manifest("nobody", "does-not-exist-GGUF", "Q4_K_M") is None
+
+
+def test_http_400_is_not_found(monkeypatch):
+    import urllib.error, urllib.request
+
+    def boom(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert reg.fetch_manifest("o", "r", "sub%2Fx.gguf") is None

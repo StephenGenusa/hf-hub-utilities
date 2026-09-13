@@ -37,8 +37,9 @@ def _request(url: str, token: str | None, timeout: int, accept: str | None = Non
     except urllib.error.HTTPError as e:
         # huggingface.co's registry returns 401 (not 404) for a repo that
         # doesn't exist when the request is unauthenticated, to avoid
-        # revealing whether a private repo exists. Treat both as "not found".
-        if e.code in (404, 401):
+        # revealing whether a private repo exists, and 400 for a tag it cannot
+        # resolve. Treat all three as "not found".
+        if e.code in (404, 401, 400):
             return None
         raise
 

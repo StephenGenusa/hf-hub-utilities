@@ -1,11 +1,10 @@
 import json
-import os
 from pathlib import Path
 
 from hfhub import cache, ollama_registry as reg
 from hfhub.state import Owned, State
 from hfhub.views.base import Presence, SkipEntry
-from hfhub.views.ollama import OllamaView, alias_manifest_path, derive_tags
+from hfhub.views.ollama import OllamaView, alias_manifest_path, blob_path, derive_tags
 from tests.gguf_fixture import write_gguf
 from tests.hub_fixture import add_repo
 
@@ -90,6 +89,13 @@ def test_create_synthesizes_when_registry_404(tmp_path: Path):
     assert any("embedded" in w for w in view.warnings)
 
 
+def two_models(tmp_path: Path, **kw):
+    """One repo, two weights sharing a basename (so one cached registry response)."""
+    files = {"M-Q4_K_M.gguf": gguf_bytes(tmp_path), "sub/M-Q4_K_M.gguf": gguf_bytes(tmp_path, arch="gemma5"),
+             "mmproj-F16.gguf": b"proj"}
+    return make(tmp_path, files=files, **kw)
+
+
 def test_offline_without_cached_response_skips(tmp_path: Path):
     hub, entries, view, calls = make(tmp_path, offline=True)
     (d,) = view.desired(entries).values()
@@ -99,6 +105,90 @@ def test_offline_without_cached_response_skips(tmp_path: Path):
     except SkipEntry:
         pass
     assert calls["manifest"] == []
+    assert not (view.root / "blobs").exists()  # skipped before anything was written
+
+
+def test_offline_with_full_cache_creates_without_network(tmp_path: Path):
+    hub, entries, view, calls = two_models(tmp_path)
+    desired = view.desired(entries)
+    view.create(desired["org/M-GGUF:M-Q4_K_M.gguf"])
+    seen = {"manifest": [], "blob": []}
+
+    def fm(org, name, tag, token=None, timeout=30):
+        seen["manifest"].append(tag)
+        return FIX
+
+    def fb(org, name, digest, token=None, timeout=60):
+        seen["blob"].append(digest)
+        return b"x"
+
+    off = OllamaView(view.root, aliases={}, offline=True, fetch_manifest=fm, fetch_blob=fb)
+    d2 = off.desired(entries)["org/M-GGUF:sub/M-Q4_K_M.gguf"]
+    off.create(d2)
+    assert seen == {"manifest": [], "blob": []}
+    assert off.present(d2) is Presence.CORRECT
+
+
+def test_alias_added_after_create_gives_partial_and_create_fills(tmp_path: Path):
+    hub, entries, view, _ = make(tmp_path)
+    (d,) = view.desired(entries).values()
+    view.create(d)
+    assert view.present(d) is Presence.CORRECT
+    view.aliases = {"m:latest": d.key}
+    (d2,) = view.desired(entries).values()
+    assert view.present(d2) is Presence.PARTIAL
+    paths = view.create(d2)
+    assert alias_manifest_path("m:latest") in paths
+    assert view.present(d2) is Presence.CORRECT
+
+
+def test_alias_of_another_model_is_kept_but_stale_alias_of_ours_is_refreshed(tmp_path: Path):
+    hub, entries, view, _ = make(tmp_path, aliases={"m:latest": "org/M-GGUF:M-Q4_K_M.gguf"})
+    (d,) = view.desired(entries).values()
+    p = view.root / alias_manifest_path("m:latest")
+    p.parent.mkdir(parents=True)
+    theirs = json.dumps({"schemaVersion": 2, "config": {"digest": "sha256:" + "2" * 64},
+                         "layers": [{"digest": "sha256:" + "3" * 64, "mediaType": reg.MT_MODEL, "size": 1}]})
+    p.write_text(theirs)
+    paths = view.create(d)
+    assert p.read_text() == theirs
+    assert alias_manifest_path("m:latest") not in paths
+    assert any("another model" in w for w in view.warnings)
+    stale = json.dumps({"schemaVersion": 2, "config": {"digest": "sha256:" + "2" * 64},
+                        "layers": [{"digest": "sha256:" + d.sha256, "mediaType": reg.MT_MODEL, "size": 1}]})
+    p.write_text(stale)
+    paths = view.create(d)
+    assert alias_manifest_path("m:latest") in paths
+    assert json.loads(p.read_text()) == json.loads((view.root / d.extra["manifest"]).read_text())
+
+
+def test_remove_keeps_blob_referenced_by_foreign_manifest(tmp_path: Path):
+    hub, entries, view, _ = make(tmp_path)
+    (d,) = view.desired(entries).values()
+    paths = view.create(d)
+    mp = view.root / "manifests/registry.ollama.ai/library/other/latest"
+    mp.parent.mkdir(parents=True)
+    mp.write_text(json.dumps({"schemaVersion": 2, "config": {"digest": "sha256:" + "2" * 64},
+                              "layers": [{"digest": "sha256:" + d.sha256, "mediaType": reg.MT_MODEL, "size": 1}]}))
+    view.remove(paths)
+    mm = next(e for e in entries if e.is_mmproj)
+    assert (view.root / blob_path(d.sha256)).exists()          # still referenced by their manifest
+    assert not (view.root / blob_path(mm.sha256)).exists()     # unreferenced: removed
+    assert not (view.root / d.extra["manifest"]).exists()
+
+
+def test_remove_keeps_small_blob_shared_with_our_other_manifest(tmp_path: Path):
+    hub, entries, view, _ = two_models(tmp_path)
+    desired = view.desired(entries)
+    a, b = desired["org/M-GGUF:M-Q4_K_M.gguf"], desired["org/M-GGUF:sub/M-Q4_K_M.gguf"]
+    paths_a = view.create(a)
+    view.create(b)
+    tmpl = blob_path(next(l for l in FIX["layers"] if l["mediaType"] == reg.MT_TEMPLATE)["digest"][7:])
+    assert tmpl in paths_a
+    view.remove(paths_a)
+    assert (view.root / tmpl).is_file()                        # b's manifest still points at it
+    assert not (view.root / blob_path(a.sha256)).exists()      # a's own weight blob goes
+    assert view.present(b) is Presence.CORRECT
 
 
 def test_aliases_write_second_manifest(tmp_path: Path):

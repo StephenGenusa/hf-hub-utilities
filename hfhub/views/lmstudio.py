@@ -41,7 +41,7 @@ class LmStudioView:
             mm = mmproj_for(e, entries)
             if mm is not None:
                 links[f"{e.repo_id}/{mm.basename}"] = mm.blob
-            out[e.key] = Desired(key=e.key, sha256=e.sha256, links=links)
+            out[e.key] = Desired(key=e.key, sha256=e.sha256, links=links, extra={"primary": rel})
         return out
 
     def _status(self, rel: str, target: Path) -> str:
@@ -51,10 +51,17 @@ class LmStudioView:
         return "wrong" if p.exists() else "missing"
 
     def present(self, d: Desired) -> Presence:
-        statuses = {self._status(rel, t) for rel, t in d.links.items()}
-        if "wrong" in statuses:
+        """The weight link is the primary artefact; the mmproj link is secondary."""
+        statuses = {rel: self._status(rel, t) for rel, t in d.links.items()}
+        values = set(statuses.values())
+        if "wrong" in values:
             return Presence.WRONG
-        return Presence.CORRECT if statuses == {"ok"} else Presence.ABSENT
+        primary = d.extra.get("primary")
+        if primary is None:
+            return Presence.CORRECT if values == {"ok"} else Presence.ABSENT
+        if statuses.get(primary) != "ok":
+            return Presence.ABSENT
+        return Presence.CORRECT if values == {"ok"} else Presence.PARTIAL
 
     def create(self, d: Desired) -> list[str]:
         for rel, target in d.links.items():

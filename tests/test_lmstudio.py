@@ -77,3 +77,15 @@ def test_foreign_lists_real_ggufs_and_outside_symlinks_only(tmp_path: Path):
     (view.root / "o2/r2/ext.gguf").symlink_to(tmp_path / "elsewhere.gguf")
     keys = sorted(f.key for f in view.foreign(state))
     assert keys == ["lmstudio:o2/r2/ext.gguf", "lmstudio:o2/r2/real.gguf"]
+
+
+def test_missing_mmproj_link_is_partial_and_create_fills(tmp_path: Path):
+    hub, entries, view = setup(tmp_path)
+    (d,) = view.desired(entries).values()
+    rel = "org/M-GGUF/M-Q4_K_M.gguf"
+    p = view.root / rel
+    p.parent.mkdir(parents=True)
+    p.symlink_to(d.links[rel])
+    assert view.present(d) is Presence.PARTIAL
+    view.create(d)
+    assert view.present(d) is Presence.CORRECT

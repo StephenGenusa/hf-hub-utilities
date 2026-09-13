@@ -32,6 +32,14 @@ def test_owned_but_wrong_is_reported_not_touched():
     assert kinds(plan) == {"k": "foreign"}
 
 
+def test_partial_is_repaired_whether_owned_or_not():
+    desired = {"fresh": d("fresh"), "owned": d("owned"), "tomb": d("tomb")}
+    presence = {k: Presence.PARTIAL for k in desired}
+    state = State(owned={"owned": Owned(["owned.gguf"], "s")}, tombstones={"tomb": "t"})
+    plan = base.reconcile(desired, presence, state)
+    assert kinds(plan) == {"fresh": "create", "owned": "create", "tomb": "skip"}
+
+
 class FakeView:
     name = "fake"
     root = Path("/view")
@@ -110,3 +118,13 @@ def test_apply_create_without_desired_raises():
     plan = base.reconcile({"k": d("k")}, {"k": Presence.ABSENT}, State())
     with pytest.raises(ValueError):
         base.apply(plan, v, State(), execute=True)
+
+
+def test_apply_repair_merges_paths_into_existing_owned():
+    v = FakeView()
+    state = State(owned={"k": Owned(["k.gguf", "stale/extra"], "s")})
+    desired = {"k": d("k")}
+    plan = base.reconcile(desired, {"k": Presence.PARTIAL}, state)
+    state = base.apply(plan, v, state, execute=True, desired=desired)
+    assert v.created == ["k"]
+    assert state.owned["k"].paths == ["k.gguf", "shared/small", "stale/extra"]

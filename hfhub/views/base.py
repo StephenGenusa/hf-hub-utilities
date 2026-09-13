@@ -12,7 +12,8 @@ from hfhub.state import Owned, State
 
 
 class Presence(Enum):
-    ABSENT = "absent"
+    ABSENT = "absent"      # the primary artefact is missing
+    PARTIAL = "partial"    # primary artefact correct, some secondary artefact missing
     CORRECT = "correct"
     WRONG = "wrong"
 
@@ -83,6 +84,8 @@ def reconcile(desired: dict[str, Desired], presence: dict[str, Presence], state:
         elif pres is Presence.WRONG:
             plan.actions.append(Action("foreign", key, d.paths,
                                        "owned path replaced by something else" if owned else "exists with a different target"))
+        elif pres is Presence.PARTIAL:
+            plan.actions.append(Action("create", key, d.paths, "incomplete; filling in what is missing"))
         elif owned and pres is Presence.CORRECT:
             plan.actions.append(Action("noop", key, d.paths))
         elif owned and pres is Presence.ABSENT:
@@ -111,7 +114,9 @@ def apply(plan: Plan, view: View, state: State, execute: bool, desired: dict[str
             except SkipEntry as e:
                 a.kind, a.note = "skip", str(e)
                 continue
-            state.owned[a.key] = Owned(paths=sorted(set(paths)), sha256=d.sha256)
+            prev = state.owned.get(a.key)
+            merged = set(paths) | set(prev.paths if prev else [])
+            state.owned[a.key] = Owned(paths=sorted(merged), sha256=d.sha256)
         elif a.kind == "adopt":
             d = desired.get(a.key)
             if d is None:

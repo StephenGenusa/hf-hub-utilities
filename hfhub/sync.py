@@ -202,7 +202,8 @@ def status(config: cfg.Config, view_names: list[str], out: Out = print) -> None:
             out(f"  {repo_id}  {blob.name[:12]}  {blob.stat().st_size / 1e9:.1f} GB")
 
 
-def view_add(config: cfg.Config, key: str, view_names: list[str], execute: bool, out: Out = print) -> None:
+def view_add(config: cfg.Config, key: str, view_names: list[str], execute: bool, out: Out = print,
+             allow_mass_removal: bool = False) -> None:
     if not _cache_present(out):
         return
     entries = cache.scan(hub_dir())
@@ -234,7 +235,7 @@ def view_add(config: cfg.Config, key: str, view_names: list[str], execute: bool,
                 cache_file = view._registry_cache(desired[key])
                 if cache_file.is_file() and _cached_as_missing(cache_file):
                     cache_file.unlink()
-            plan, _ = sync_view(view, entries, execute)
+            plan, _ = sync_view(view, entries, execute, allow_mass_removal)
         except (st.StateError, PermissionError) as e:
             _abort(view, e, out)
             continue

@@ -37,6 +37,9 @@ def _parser() -> argparse.ArgumentParser:
         p.add_argument("key", help="<org/name>:<relpath> or, with --foreign, a foreign key")
         view_opt(p)
         p.add_argument("--execute", action="store_true")
+        if name == "add":
+            p.add_argument("--allow-mass-removal", action="store_true",
+                           help="apply a plan that removes every entry sync owns in a view")
         if name == "remove":
             p.add_argument("--foreign", action="store_true", help="delete a foreign (non-owned) item")
     p = vs.add_parser("adopt")
@@ -71,7 +74,8 @@ def xfer_main(argv: list[str] | None = None) -> int:
         if args.vcmd == "status":
             sync.status(config, views, out=print)
         elif args.vcmd == "add":
-            sync.view_add(config, args.key, views, execute=args.execute, out=print)
+            sync.view_add(config, args.key, views, execute=args.execute, out=print,
+                          allow_mass_removal=args.allow_mass_removal)
         elif args.vcmd == "remove":
             if args.foreign:
                 from hfhub import adopt

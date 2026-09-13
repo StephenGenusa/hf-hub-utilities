@@ -78,6 +78,34 @@ def save(config: Config) -> None:
     _write(config.path, dump(config))
 
 
+def _header_of(line: str) -> str:
+    """The table header on this line, ignoring a trailing comment."""
+    return re.sub(r"\s*#.*$", "", line).strip()
+
+
+def _refuse_inline(text: str, view: str, path: Path) -> None:
+    """Refuse when the aliases exist but not as a `[views.<view>.aliases]` table.
+
+    An inline `aliases = {...}` (or any other spelling this line editor cannot
+    see) would get a second, conflicting definition appended. A decode error here
+    is left to _validate, which reports it properly.
+    """
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return
+    if data.get("views", {}).get(view, {}).get("aliases"):
+        raise ValueError(f"config uses an inline aliases table; add the alias by hand: {path}")
+
+
+def _validate(rendered: str, path: Path) -> None:
+    """Never leave a config on disk that tomllib cannot read back."""
+    try:
+        tomllib.loads(rendered)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"{path}: refusing to write unparseable TOML ({e})") from e
+
+
 def add_alias(config: Config, view: str, alias: str, target: str) -> None:
     """Add or replace one alias line, leaving every other byte of the file alone.
 
@@ -89,13 +117,16 @@ def add_alias(config: Config, view: str, alias: str, target: str) -> None:
     header = f"[views.{view}.aliases]"
     text = config.path.read_text() if config.path.is_file() else ""
     lines = text.split("\n")
-    start = next((i for i, l in enumerate(lines) if l.strip() == header), None)
+    start = next((i for i, l in enumerate(lines) if _header_of(l) == header), None)
     if start is None:
+        _refuse_inline(text, view, config.path)
         body = text if not text or text.endswith("\n") else text + "\n"
-        _write(config.path, f"{body}\n{header}\n{line}\n")
+        rendered = f"{body}\n{header}\n{line}\n"
     else:
         end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
-        key = re.compile(r"^\s*(?:%s|%s)\s*=" % (re.escape(_q(alias)), re.escape(alias)))
+        # the same key may already be there bare, double- or single-quoted
+        esc, raw = re.escape(_q(alias)[1:-1]), re.escape(alias)
+        key = re.compile(rf"^\s*(?:\"(?:{esc}|{raw})\"|'{raw}'|{raw})\s*=")
         hit = next((i for i in range(start + 1, end) if key.match(lines[i])), None)
         if hit is not None:
             lines[hit] = line
@@ -103,5 +134,7 @@ def add_alias(config: Config, view: str, alias: str, target: str) -> None:
             while end > start + 1 and not lines[end - 1].strip():
                 end -= 1                      # insert before the blank line(s) that end the table
             lines.insert(end, line)
-        _write(config.path, "\n".join(lines))
+        rendered = "\n".join(lines)
+    _validate(rendered, config.path)
+    _write(config.path, rendered)
     config.views.setdefault(view, ViewConfig()).aliases[alias] = target

@@ -37,3 +37,14 @@ def test_hfu_no_sync_flag_is_own_option():
 def test_help_lists_import_and_export():
     help_text = cli._parser().format_help()
     assert "import" in help_text and "export" in help_text
+
+
+def test_view_add_threads_allow_mass_removal(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli.sync, "view_add", lambda config, key, views, execute, out, allow_mass_removal:
+                        seen.update(key=key, allow_mass_removal=allow_mass_removal))
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config(path=None, views={}))
+    assert cli.xfer_main(["view", "add", "o/r:f.gguf", "--execute"]) == 0
+    assert seen == {"key": "o/r:f.gguf", "allow_mass_removal": False}
+    assert cli.xfer_main(["view", "add", "o/r:f.gguf", "--allow-mass-removal"]) == 0
+    assert seen["allow_mass_removal"] is True

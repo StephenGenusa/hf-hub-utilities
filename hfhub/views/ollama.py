@@ -17,7 +17,7 @@ from hfhub.views.lmstudio import remove_empty_parents
 
 REGISTRY_CACHE_DIR = ".hfhub-registry"
 _TAG_OK = re.compile(r"^[A-Za-z0-9._-]+$")
-_QUANT = re.compile(r"(?:^|[-._])((?:UD-)?(?:IQ|Q|TQ)\d[A-Za-z0-9_]*|BF16|F16|F32|MXFP4(?:_MOE)?)$")
+_QUANT = re.compile(r"(?:^|[-._])((?:UD-)?(?:IQ|Q|TQ)\d[A-Za-z0-9_]*|BF16|F16|F32|MXFP4(?:_MOE)?)$", re.IGNORECASE)
 
 
 def blob_path(sha256: str) -> str:
@@ -53,9 +53,9 @@ def derive_tags(entries: list[GgufEntry]) -> dict[str, str]:
             out[e.key] = m.group(1) if m and _TAG_OK.match(m.group(1)) else _safe_tag(e.basename)
         used: dict[str, int] = {}
         for e in es:
-            used[out[e.key]] = used.get(out[e.key], 0) + 1
+            used[out[e.key].lower()] = used.get(out[e.key].lower(), 0) + 1
         for e in es:
-            if used[out[e.key]] > 1:
+            if used[out[e.key].lower()] > 1:
                 out[e.key] = _safe_tag(e.relpath.replace("/", "_"))
     return out
 

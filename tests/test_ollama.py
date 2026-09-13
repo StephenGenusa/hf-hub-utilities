@@ -309,3 +309,13 @@ def test_registry_tag_is_percent_encoded_relpath(tmp_path: Path):
     (d,) = view.desired(cache.scan(hub)).values()
     view.create(d)
     assert calls == ["sub%2FM-Q4_K_M.gguf"]
+
+
+def test_quant_tag_match_is_case_insensitive_and_dupes_compare_case_insensitively(tmp_path: Path):
+    hub = tmp_path / "hub"
+    add_repo(hub, "o/r", {"m.f16.gguf": b"1", "n-q8_0.gguf": b"2", "x-BF16.gguf": b"3", "x-bf16.gguf": b"4"})
+    tags = derive_tags(cache.scan(hub))
+    assert tags["o/r:m.f16.gguf"] == "f16"
+    assert tags["o/r:n-q8_0.gguf"] == "q8_0"
+    assert tags["o/r:x-BF16.gguf"] == "x-BF16.gguf"   # BF16 vs bf16 would be one name to Ollama
+    assert tags["o/r:x-bf16.gguf"] == "x-bf16.gguf"

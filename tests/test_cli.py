@@ -48,3 +48,35 @@ def test_view_add_threads_allow_mass_removal(monkeypatch):
     assert seen == {"key": "o/r:f.gguf", "allow_mass_removal": False}
     assert cli.xfer_main(["view", "add", "o/r:f.gguf", "--allow-mass-removal"]) == 0
     assert seen["allow_mass_removal"] is True
+
+
+def test_cache_thin_parses_rules(monkeypatch, tmp_path):
+    from hfhub import cache_ops
+    seen = {}
+    monkeypatch.setattr(cli.sync, "hub_dir", lambda: tmp_path)
+    monkeypatch.setattr(cache_ops, "thin", lambda hub, execute, min_bits, max_size, repos, allow_empty, out: seen.update(
+        hub=hub, execute=execute, min_bits=min_bits, max_size=max_size, repos=repos, allow_empty=allow_empty))
+    assert cli.xfer_main(["cache", "thin", "--min-quant", "IQ4_XS", "--max-size", "23G", "--repo", "o/r", "--execute"]) == 0
+    assert seen == {"hub": tmp_path, "execute": True, "min_bits": 4, "max_size": 23_000_000_000, "repos": ["o/r"], "allow_empty": False}
+
+
+def test_cache_thin_requires_a_rule(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.sync, "hub_dir", lambda: tmp_path)
+    assert cli.xfer_main(["cache", "thin"]) == 2
+
+
+def test_cache_commands_dispatch_and_default_to_dry_run(monkeypatch, tmp_path):
+    from hfhub import cache_ops
+    calls = []
+    monkeypatch.setattr(cli.sync, "hub_dir", lambda: tmp_path)
+    for name in ("repair", "dedupe", "prune_superseded"):
+        monkeypatch.setattr(cache_ops, name, lambda hub, execute, out, _n=name: calls.append((_n, execute)))
+    monkeypatch.setattr(cache_ops, "report", lambda hub, out: calls.append(("report", None)))
+    for sub in ("report", "repair", "dedupe", "prune-superseded"):
+        assert cli.xfer_main(["cache", sub]) == 0
+    assert calls == [("report", None), ("repair", False), ("dedupe", False), ("prune_superseded", False)]
+
+
+def test_cache_commands_refuse_missing_hub(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.sync, "hub_dir", lambda: tmp_path / "nope")
+    assert cli.xfer_main(["cache", "report"]) == 2

@@ -262,3 +262,81 @@ class TestTableRows:
         assert bf16[3] == "2 files"
         single = next(r for r in rows if r[1] == "Q8_0")
         assert single[3] == ""
+
+
+class TestCacheStatus:
+    """probe_cache compares the Hub's content hash with what the local hub cache holds."""
+
+    REPO = "org/Model-GGUF"
+
+    @staticmethod
+    def _sha(content: bytes) -> str:
+        import hashlib
+        return hashlib.sha256(content).hexdigest()
+
+    def _hub(self, tmp_path, files):
+        from tests.hub_fixture import add_repo
+        add_repo(tmp_path, self.REPO, files)
+        return tmp_path
+
+    def test_current_when_hub_blob_is_cached(self, tmp_path):
+        hub = self._hub(tmp_path, {"m-Q4_K_M.gguf": b"q4"})
+        files = [RepoFile("m-Q4_K_M.gguf", 2, self._sha(b"q4"))]
+        assert hfu.probe_cache(hub, self.REPO, files) == {"m-Q4_K_M.gguf": "current"}
+
+    def test_stale_when_upstream_content_changed(self, tmp_path):
+        hub = self._hub(tmp_path, {"m-Q4_K_M.gguf": b"old"})
+        files = [RepoFile("m-Q4_K_M.gguf", 3, self._sha(b"new"))]
+        assert hfu.probe_cache(hub, self.REPO, files) == {"m-Q4_K_M.gguf": "stale"}
+
+    def test_absent_files_are_omitted(self, tmp_path):
+        hub = self._hub(tmp_path, {"m-Q4_K_M.gguf": b"q4"})
+        files = [RepoFile("m-Q8_0.gguf", 2, self._sha(b"q8"))]
+        assert hfu.probe_cache(hub, self.REPO, files) == {}
+
+    def test_unknown_hash_reports_cached(self, tmp_path):
+        hub = self._hub(tmp_path, {"m-Q4_K_M.gguf": b"q4"})
+        files = [RepoFile("m-Q4_K_M.gguf", 2)]
+        assert hfu.probe_cache(hub, self.REPO, files) == {"m-Q4_K_M.gguf": "cached"}
+
+    def test_plain_copy_without_symlinks_reports_cached(self, tmp_path):
+        from tests.hub_fixture import folder
+        snap = tmp_path / folder(self.REPO) / "snapshots" / "abc"
+        snap.mkdir(parents=True)
+        (snap / "m-Q4_K_M.gguf").write_bytes(b"q4")
+        files = [RepoFile("m-Q4_K_M.gguf", 2, self._sha(b"q4"))]
+        assert hfu.probe_cache(tmp_path, self.REPO, files) == {"m-Q4_K_M.gguf": "cached"}
+
+    def test_repo_not_in_cache(self, tmp_path):
+        files = [RepoFile("m-Q4_K_M.gguf", 2, self._sha(b"q4"))]
+        assert hfu.probe_cache(tmp_path, self.REPO, files) == {}
+
+
+class TestCacheNote:
+    def _quant(self, n):
+        return hfu.Quant("Q4", [f"m-Q4-0000{i}-of-0000{n}.gguf" for i in range(1, n + 1)], n)
+
+    def test_all_current(self):
+        q = self._quant(1)
+        assert hfu.cache_note(q, {q.files[0]: "current"}) == "✓ cached"
+
+    def test_any_stale_means_update_available(self):
+        q = self._quant(2)
+        assert hfu.cache_note(q, {q.files[0]: "current", q.files[1]: "stale"}) == "↻ update available"
+
+    def test_partial_shards(self):
+        q = self._quant(3)
+        assert hfu.cache_note(q, {q.files[0]: "current"}) == "partial (1/3)"
+
+    def test_not_cached(self):
+        assert hfu.cache_note(self._quant(1), {}) == ""
+
+    def test_table_rows_combine_shard_and_cache_notes(self):
+        quants = hfu.group_quants(UNSLOTH_FILES)
+        bf16 = next(q for q in quants if q.name == "BF16")
+        q8 = next(q for q in quants if q.name == "Q8_0")
+        states = {f: "current" for f in bf16.files} | {q8.files[0]: "stale"}
+        rows = {r[1]: r for r in hfu.table_rows(quants, states)}
+        assert rows["BF16"][3] == "2 files · ✓ cached"
+        assert rows["Q8_0"][3] == "↻ update available"
+        assert rows["MXFP4_MOE"][3] == ""

@@ -38,9 +38,14 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class RepoFile:
-    """A file in a Hub repo: relative path and size in bytes (None if unknown)."""
+    """
+    A file in a Hub repo: relative path, size in bytes, and content hash (the
+    LFS sha256, else the git blob id), which is also its blob name in the
+    hub cache. Size and hash are None if unknown.
+    """
     path: str
     size: int | None = None
+    blob: str | None = None
 
 
 @dataclass
@@ -329,12 +334,50 @@ def parse_hf_input(input_str: str) -> tuple[str, str]:
     return f"{parts[0]}/{parts[1]}", repo_type
 
 
-def table_rows(quants: list[Quant]) -> list[tuple[str, str, str, str]]:
-    """Rows for the picker: (#, name, size, shard note)."""
-    return [
-        (str(i), q.name, format_size(q.size), f"{len(q.files)} files" if len(q.files) > 1 else "")
-        for i, q in enumerate(quants, 1)
-    ]
+def cache_note(quant: Quant, states: dict[str, str]) -> str:
+    """Picker note for how much of a quant is already in the hub cache (see probe_cache)."""
+    have = [states[f] for f in quant.files if f in states]
+    if not have:
+        return ""
+    if len(have) < len(quant.files):
+        return f"partial ({len(have)}/{len(quant.files)})"
+    if "stale" in have:
+        return "↻ update available"
+    return "✓ cached"
+
+
+def table_rows(quants: list[Quant], states: dict[str, str] | None = None) -> list[tuple[str, str, str, str]]:
+    """Rows for the picker: (#, name, size, shard and cache note)."""
+    rows = []
+    for i, q in enumerate(quants, 1):
+        notes = [f"{len(q.files)} files" if len(q.files) > 1 else "", cache_note(q, states or {})]
+        rows.append((str(i), q.name, format_size(q.size), " · ".join(n for n in notes if n)))
+    return rows
+
+
+def probe_cache(hub, repo_id: str, files: list[RepoFile]) -> dict[str, str]:
+    """
+    Cache state of each file that is on disk, by path. Files not cached are omitted.
+
+      current - the blob the Hub serves now is in the cache
+      stale   - some snapshot links the file to a blob other than the Hub's current one
+      cached  - some snapshot has the file, but it can't be checked: no Hub hash,
+                or a plain copy (a cache written without symlink support)
+    """
+    from pathlib import Path
+
+    root = Path(hub) / ("models--" + repo_id.replace("/", "--"))
+    snaps = root / "snapshots"
+    snap_dirs = [d for d in snaps.iterdir() if d.is_dir()] if snaps.is_dir() else []
+    states: dict[str, str] = {}
+    for f in files:
+        if f.blob and (root / "blobs" / f.blob).is_file():
+            states[f.path] = "current"
+        else:
+            found = [d / f.path for d in snap_dirs if os.path.lexists(d / f.path)]
+            if found:
+                states[f.path] = "stale" if f.blob and all(e.is_symlink() for e in found) else "cached"
+    return states
 
 
 # --------------------------------------------------------------------------- #
@@ -346,11 +389,21 @@ def fetch_repo_files(repo_id: str, repo_type: str) -> list[RepoFile]:
     from huggingface_hub import HfApi
 
     info = HfApi().repo_info(repo_id, repo_type=repo_type, files_metadata=True)
-    return [RepoFile(s.rfilename, s.size) for s in (info.siblings or [])]
+    return [RepoFile(s.rfilename, s.size, s.lfs.sha256 if s.lfs else s.blob_id)
+            for s in (info.siblings or [])]
 
 
-def render_table(quants: list[Quant]) -> None:
-    rows = table_rows(quants)
+def local_cache_states(repo_id: str, files: list[RepoFile]) -> dict[str, str]:
+    """probe_cache against the configured hub cache; {} if it can't be read."""
+    try:
+        from hfhub.sync import hub_dir
+        return probe_cache(hub_dir(), repo_id, files)
+    except Exception:  # the marker is a hint; never block the picker over it
+        return {}
+
+
+def render_table(quants: list[Quant], states: dict[str, str] | None = None) -> None:
+    rows = table_rows(quants, states)
     try:
         from rich.console import Console
         from rich.table import Table
@@ -402,7 +455,7 @@ def resolve_gguf_download(repo_id: str, files: list[RepoFile], quant_specs: list
             picked = pick_mmproj(mmproj_all, mmproj_mode)
             print(f"👁  vision model — will include: {', '.join(picked) or 'no mmproj (--mmproj none)'}")
         print()
-        render_table(quants)
+        render_table(quants, local_cache_states(repo_id, files))
         print()
         if not sys.stdin.isatty():
             raise ValueError("stdin is not a terminal; pass -q <quant> to choose non-interactively")

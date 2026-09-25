@@ -67,6 +67,11 @@ models (`--mmproj F16|BF16|F32|all|none`, default F16 > BF16 > F32), and
 `README.md` comes along when present. Files are requested by exact name, never
 by glob.
 
+The picker marks quants already in the hub cache by comparing each file's Hub
+hash with the local blobs: `✓ cached` when the Hub's current version is on
+disk, `↻ update available` when a cached file differs from what the Hub serves
+now, and `partial (n/m)` when only some shards are present.
+
 ```bash
 hfu unsloth/Qwen3.6-35B-A3B-GGUF                 # interactive picker
 hfu unsloth/Qwen3.6-35B-A3B-GGUF -q UD-Q4_K_S    # scripted

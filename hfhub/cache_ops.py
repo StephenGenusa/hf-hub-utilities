@@ -254,15 +254,21 @@ def dedupe(hub: Path, execute: bool, out: Out = print) -> Result:
                 owners[b.name].append(b)
     for sha, store in shared.items():
         size = store.stat().st_size
+        left = []  # copies not linked into the store still get hardlinked to each other below
         for dup in owners.pop(sha, []):
             if dup.stat().st_size != size or dup.stat().st_dev != store.stat().st_dev:
+                left.append(dup)
+                continue
+            if execute and not hfblobs.link_into_store(dup, store):
+                res.notes.append(f"{_repo_id(dup.parent.parent)}:{sha[:12]}: could not link into the shared store")
+                left.append(dup)
                 continue
             res.actions += 1
             res.bytes += size
             out(f"  {'linked' if execute else 'would link'} into the shared store: "
                 f"{_repo_id(dup.parent.parent)}:{sha[:12]}")
-            if execute:
-                hfblobs.link_into_store(dup, store)
+        if left:
+            owners[sha] = left
     for sha, paths in owners.items():
         paths.sort(key=lambda p: (-p.stat().st_nlink, str(p)))
         canon = paths[0]
@@ -301,6 +307,8 @@ def dedupe(hub: Path, execute: bool, out: Out = print) -> Result:
                     blob.parent.mkdir(exist_ok=True)
                     shutil.move(str(f), str(blob))
                     f.symlink_to(_rel_target(rel, sha))
+    for n in res.notes:
+        out(f"  note: {n}")
     out(res.summary("dedupe", execute))
     return res
 
@@ -309,6 +317,7 @@ def dedupe(hub: Path, execute: bool, out: Out = print) -> Result:
 def prune_superseded(hub: Path, execute: bool, out: Out = print) -> Result:
     """Delete blobs that an older snapshot links where main now links a different blob at the same path."""
     res = Result()
+    planned: list[Path] = []
     for repo in sorted(hub.glob("models--*")):
         ref = _main_ref(repo)
         snaps = repo / "snapshots"
@@ -334,11 +343,13 @@ def prune_superseded(hub: Path, execute: bool, out: Out = print) -> Result:
                     l.unlink()
                 res.bytes += hfblobs.delete_blob(blob)
             else:
-                res.bytes += sz
+                planned.append(blob)
         if execute:
             for d in snaps.iterdir():
                 if d.name != ref:
                     _rmdir_empty(d)
+    if not execute:
+        res.bytes = hfblobs.expected_freed(planned)
     out(res.summary("prune", execute))
     if execute and res.actions:
         out("run `hf-xfer sync --execute` to prune the views")
@@ -412,6 +423,7 @@ def thin(hub: Path, execute: bool, min_bits: int | None = None, max_size: int | 
          repos: list[str] | None = None, allow_empty: bool = False, out: Out = print) -> Result:
     """Delete quants below ``min_bits`` or larger than ``max_size`` in repos that keep at least one quant."""
     res = Result()
+    planned: list[Path] = []
     entries = cache.scan(hub)
     by_repo: dict[str, list[cache.GgufEntry]] = defaultdict(list)
     for e in entries:
@@ -443,7 +455,9 @@ def thin(hub: Path, execute: bool, min_bits: int | None = None, max_size: int | 
                         l.unlink()
                 res.bytes += hfblobs.delete_blob(e.blob)
             else:
-                res.bytes += e.size
+                planned.append(e.blob)
+    if not execute:
+        res.bytes = hfblobs.expected_freed(planned)
     out(res.summary("thin", execute))
     if execute and res.actions:
         out("run `hf-xfer sync --execute` to prune the views")

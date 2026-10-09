@@ -69,6 +69,7 @@ def test_thin_keeps_a_store_file_another_repo_uses(tmp_path):
     add_repo(hub, "o/b", {"m-Q4_K_M.gguf": b"same"})
     share(hub, "o/a", b"same")
     share(hub, "o/b", b"same")
+    assert cache_ops.thin(hub, execute=False, min_bits=8, repos=["o/a"], out=lambda *_: None).bytes == 0
     res = cache_ops.thin(hub, execute=True, min_bits=8, repos=["o/a"], out=lambda *_: None)
     assert res.actions == 1 and res.bytes == 0          # nothing freed: o/b still uses the bytes
     assert len(store_files(hub)) == 1
@@ -90,6 +91,22 @@ def test_dedupe_links_a_plain_copy_into_the_store(tmp_path):
     # the store still knows both links: dropping one repo keeps the bytes for the other
     assert blobs.delete_blob(a) == 0 and b.read_bytes() == b"same"
     assert blobs.delete_blob(b) == len(b"same") and store_files(hub) == []
+
+
+@shared_store
+def test_dedupe_hardlinks_copies_the_store_would_not_take(tmp_path, monkeypatch):
+    hub = tmp_path / "hub"
+    for r in ("o/a", "o/b", "o/c"):
+        add_repo(hub, r, {"m.gguf": b"same"})
+    share(hub, "o/a", b"same")
+    monkeypatch.setattr(blobs, "link_into_store", lambda blob, store: False)
+    lines = []
+    res = cache_ops.dedupe(hub, execute=True, out=lines.append)
+    b, c = (hub / folder(r) / "blobs" / hashlib.sha256(b"same").hexdigest() for r in ("o/b", "o/c"))
+    assert not any("linked into the shared store" in l for l in lines)
+    assert any("could not link into the shared store" in n for n in res.notes)
+    assert not b.is_symlink() and b.stat().st_ino == c.stat().st_ino   # still deduplicated, by hardlink
+    assert res.actions == 1
 
 
 @shared_store

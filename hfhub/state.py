@@ -4,13 +4,19 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 STATE_FILE = ".hfhub-state.json"
 
 
 class StateError(Exception):
     pass
+
+
+def _within_view(rel: str) -> bool:
+    """True for a relative path that stays inside the view root ("/"-separated)."""
+    return bool(rel) and not rel.startswith("/") and not PureWindowsPath(rel).drive \
+        and ".." not in PurePosixPath(rel).parts
 
 
 @dataclass
@@ -61,6 +67,11 @@ def load(root: Path) -> State:
     # Windows runs before paths were normalised wrote "sub\m.gguf"; Hub paths use "/".
     fix = lambda s: s.replace("\\", "/")
     owned = {fix(k): Owned(paths=[fix(x) for x in o.paths], sha256=o.sha256) for k, o in owned.items()}
+    # Owned paths are what sync deletes; one that leaves the view is never ours.
+    for k, o in owned.items():
+        for x in o.paths:
+            if not _within_view(x):
+                raise StateError(f"{p}: owned[{k!r}] path {x!r} lies outside the view")
     return State(owned=owned, tombstones={fix(k): v for k, v in raw_tombstones.items()})
 
 

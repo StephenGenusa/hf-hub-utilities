@@ -68,3 +68,11 @@ def test_backslash_keys_from_older_windows_runs_are_normalised(tmp_path: Path):
     assert list(s.owned) == ["o/r:sub/m.gguf"]
     assert s.owned["o/r:sub/m.gguf"].paths == ["o/r/sub/m.gguf"]
     assert s.tombstones == {"o/r:sub/n.gguf": "2026-01-01"}
+
+
+@pytest.mark.parametrize("bad", ["../x.gguf", "a/../../x.gguf", r"..\x.gguf", "/etc/x.gguf", "C:/x.gguf", ""])
+def test_owned_path_outside_the_view_is_rejected(tmp_path: Path, bad):
+    (tmp_path / st.STATE_FILE).write_text(json.dumps({
+        "version": 1, "owned": {"o/r:m.gguf": {"paths": [bad], "sha256": "ab"}}, "tombstones": {}}))
+    with pytest.raises(st.StateError, match="outside the view"):
+        st.load(tmp_path)

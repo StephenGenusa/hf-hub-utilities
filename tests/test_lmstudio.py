@@ -89,3 +89,14 @@ def test_missing_mmproj_link_is_partial_and_create_fills(tmp_path: Path):
     assert view.present(d) is Presence.PARTIAL
     view.create(d)
     assert view.present(d) is Presence.CORRECT
+
+
+def test_remove_refuses_a_path_through_a_symlinked_folder_leading_outside(tmp_path: Path):
+    view = LmStudioView(tmp_path / "lm")
+    outside = tmp_path / "elsewhere"; outside.mkdir()
+    (outside / "x.gguf").write_bytes(b"keep me")
+    view.root.mkdir()
+    (view.root / "org").symlink_to(outside)
+    view.remove(["org/x.gguf"])
+    assert (outside / "x.gguf").read_bytes() == b"keep me"
+    assert any("outside" in w for w in view.warnings)

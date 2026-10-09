@@ -13,7 +13,7 @@ from hfhub.cache import GgufEntry, mmproj_for, read_link, weights
 from hfhub.gguf_header import read_header
 from hfhub.state import Owned, State
 from hfhub.views.base import Desired, ForeignItem, Presence, SkipEntry, link_into_cache
-from hfhub.views.lmstudio import remove_empty_parents
+from hfhub.views.lmstudio import inside_root, remove_empty_parents
 
 REGISTRY_CACHE_DIR = ".hfhub-registry"
 _TAG_OK = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -289,6 +289,9 @@ class OllamaView:
     # ---- remove / foreign ---------------------------------------------
     def _unlink(self, rel: str) -> None:
         p = self.root / rel
+        if not inside_root(self.root, p):
+            self.warnings.append(f"{rel}: resolves outside {self.root}; not removed")
+            return
         if p.is_symlink() or p.exists():
             p.unlink()
         remove_empty_parents(self.root, p)

@@ -192,3 +192,16 @@ def test_fetch_assets_without_refs_main_uses_newest_snapshot(tmp_path: Path):
     ops.fetch_assets(hub, execute=False, out=lambda m: None,
                      list_fn=lambda rid, c: seen.append(c) or [])
     assert seen == [new]
+
+
+# ---------------------------------------------------------------- dry run predicts what execute frees
+def test_thin_dry_run_counts_a_hardlinked_blob_only_when_every_link_goes(tmp_path: Path):
+    hub = tmp_path / "hub"
+    add_repo(hub, "o/a", {"m-Q4_K_M.gguf": b"same-q4", "m-Q8_0.gguf": b"a8"})
+    add_repo(hub, "o/b", {"m-Q4_K_M.gguf": b"same-q4", "m-Q8_0.gguf": b"b8"})
+    ops.dedupe(hub, execute=True, out=lambda m: None)   # the two Q4 blobs become one inode
+    quiet = lambda m: None
+    one = ops.thin(hub, execute=False, min_bits=8, repos=["o/a"], out=quiet)
+    both = ops.thin(hub, execute=False, min_bits=8, out=quiet)
+    assert (one.bytes, both.bytes) == (0, len(b"same-q4"))
+    assert ops.thin(hub, execute=True, min_bits=8, out=quiet).bytes == both.bytes

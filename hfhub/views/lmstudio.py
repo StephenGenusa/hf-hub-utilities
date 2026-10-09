@@ -10,6 +10,12 @@ from hfhub.state import Owned
 from hfhub.views.base import Desired, ForeignItem, Presence, link_into_cache
 
 
+def inside_root(root: Path, path: Path) -> bool:
+    """True when `path` really lives under `root`, after resolving every directory
+    on the way (but not `path` itself, which is usually a link)."""
+    return Path(os.path.realpath(path.parent)).is_relative_to(os.path.realpath(root))
+
+
 def remove_empty_parents(root: Path, path: Path) -> None:
     """Remove empty directories from path's parent up to (not including) root."""
     d = path.parent
@@ -83,6 +89,9 @@ class LmStudioView:
     def remove(self, paths: list[str]) -> None:
         for rel in paths:
             p = self.root / rel
+            if not inside_root(self.root, p):
+                self.warnings.append(f"{rel}: resolves outside {self.root}; not removed")
+                continue
             if p.is_symlink() or p.exists():
                 p.unlink()
             remove_empty_parents(self.root, p)

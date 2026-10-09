@@ -13,7 +13,9 @@ collect the store file once nothing else references it.
 from __future__ import annotations
 
 import os
+from collections import defaultdict
 from pathlib import Path
+from typing import Iterable
 
 try:  # huggingface_hub >= 2.x; absent before the shared store existed
     from huggingface_hub.utils import _shared_blobs as _hf_shared
@@ -68,6 +70,35 @@ def delete_blob(blob: Path) -> int:
     if _hf_shared is None or not store.exists():
         return 0
     return _hf_shared.sweep_shared_blob(store, cache_dir=hub_of(blob))
+
+
+def expected_freed(planned: Iterable[Path]) -> int:
+    """Bytes ``delete_blob`` would free, in total, deleting every repo blob in `planned`.
+
+    What a dry run reports, so it agrees with the run that executes: a hardlinked
+    blob counts once, and only when all its links are planned; a shared-store file
+    counts only when every repo blob that references it is planned.
+    """
+    inodes: dict[tuple[int, int], set[Path]] = defaultdict(set)
+    stores: dict[Path, set[Path]] = defaultdict(set)
+    for b in planned:
+        b = Path(os.path.abspath(b))
+        if is_shared(b):
+            if b.exists():
+                stores[Path(os.path.realpath(b))].add(b)
+        elif b.exists():
+            s = b.stat()
+            inodes[(s.st_dev, s.st_ino)].add(b)
+    total = 0
+    for paths in inodes.values():
+        s = next(iter(paths)).stat()
+        if len(paths) >= s.st_nlink:
+            total += s.st_size
+    if _hf_shared is not None:
+        for store, refs in stores.items():
+            total += _hf_shared.expected_shared_blob_freed_size(
+                store, blob_paths_to_delete=refs, cache_dir=hub_of(next(iter(refs))))
+    return total
 
 
 def link_into_store(blob: Path, store: Path) -> bool:

@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Callable
 
 from hfhub import cache, config as cfg, ollama_registry as reg, state as st
-from hfhub.views.base import Plan, Presence, View, apply, reconcile
-from hfhub.views.lmstudio import LmStudioView
+from hfhub.views.base import Plan, Presence, View, apply, link_into_hub, reconcile
+from hfhub.views.lmstudio import LmStudioView, inside_root, remove_empty_parents
 from hfhub.views.ollama import OllamaView
 from hfhub.xfer import resolve_cache_dir
 
@@ -284,3 +284,82 @@ def view_remove(config: cfg.Config, key: str, view_names: list[str], execute: bo
             except PermissionError as e:
                 _abort(view, e, out)
                 continue
+
+
+def _broken_cache_links(root: Path, hub: Path) -> list[str]:
+    """View-relative paths of symlinks that point into `hub` at something no longer there."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            p = Path(dirpath) / name
+            if p.is_symlink() and not p.exists() and link_into_hub(p, hub):
+                found.append(p.relative_to(root).as_posix())
+    return sorted(found)
+
+
+def _manifests_using(root: Path, digests: set[str]) -> list[str]:
+    """Ollama manifests (relative to the manifests dir) with a layer among `digests`."""
+    mroot = root / "manifests"
+    out = []
+    for m in sorted(p for p in mroot.rglob("*") if p.is_file()) if mroot.is_dir() else []:
+        try:
+            data = json.loads(m.read_text())
+            layers = list(data["layers"]) + ([data["config"]] if isinstance(data.get("config"), dict) else [])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if any(str(l.get("digest", "")).removeprefix("sha256:") in digests for l in layers):
+            out.append(m.relative_to(mroot).as_posix())
+    return out
+
+
+def clean(config: cfg.Config, view_names: list[str], execute: bool, out: Out = print) -> int:
+    """Remove view links that point into the HF cache at files that are gone.
+
+    Only links sync does not own: an owned link is sync's to relink or prune, and
+    deleting an owned primary link would read to sync as the user deleting the model
+    (a tombstone). Links that resolve, and links pointing outside the cache, are
+    never touched. Returns the number of links removed (or that would be).
+    """
+    hub = hub_dir()
+    total = 0
+    for name in view_names:
+        view = build_view(name, config, offline=True)
+        if view is None:
+            continue
+        try:
+            _check_root(view)
+        except ViewSkipped as e:
+            out(str(e))
+            continue
+        state = _load_state(view, out)
+        if state is None:
+            continue
+        owned = {p for o in state.owned.values() for p in o.paths}
+        removed, left_to_sync = [], []
+        for rel in _broken_cache_links(view.root, hub):
+            if rel in owned:
+                left_to_sync.append(rel)
+                continue
+            p = view.root / rel
+            if not inside_root(view.root, p):
+                out(f"  skipped   {rel}: resolves outside {view.root}")
+                continue
+            out(f"  {'removed' if execute else 'would remove'} {rel}")
+            removed.append(rel)
+            if execute:
+                try:
+                    p.unlink()
+                    remove_empty_parents(view.root, p)
+                except PermissionError as e:
+                    _abort(view, e, out)
+                    break
+        for rel in left_to_sync:
+            out(f"  owned     {rel}: broken; `hf-xfer sync --execute` relinks or prunes it")
+        if name == "ollama":
+            digests = {r.removeprefix("blobs/sha256-") for r in removed if r.startswith("blobs/sha256-")}
+            for m in _manifests_using(view.root, digests):
+                out(f"  note      manifest {m} used a removed blob; that model no longer loads "
+                    f"(`hf-xfer view remove --foreign` it, or pull it again)")
+        out(f"[{name}] {'applied' if execute else 'dry run'}: clean {len(removed)} broken link(s)")
+        total += len(removed)
+    return total

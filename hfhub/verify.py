@@ -97,7 +97,7 @@ def check_lmstudio(view, hub: Path, linked: set[Path], r: Report) -> None:
         if target is None:
             r.note(f"{rel}: links outside the HF cache ({hfblobs.read_link(p)})")
         elif not p.exists():
-            r.problem(f"{rel}: broken link -> {target}")
+            r.problem(f"{rel}: broken link -> {target} (`hf-xfer sync --execute`, then `hf-xfer view clean --execute`)")
         elif Path(os.path.realpath(p)) not in resolved_linked:
             r.problem(f"{rel}: links a cache file no snapshot uses any more")
 
@@ -126,7 +126,7 @@ def check_ollama(view, hub: Path, linked: set[Path], r: Report) -> None:
             elif b.is_symlink():
                 target = _into_hub(b, hub)
                 if not b.exists():
-                    r.problem(f"{rel}: blob {digest[:12]} is a broken link")
+                    r.problem(f"{rel}: blob {digest[:12]} is a broken link (`hf-xfer sync --execute`, then `hf-xfer view clean --execute`)")
                 elif target is not None and target.name != digest:
                     r.problem(f"{rel}: blob {digest[:12]} links a file named {target.name[:12]} "
                               f"(written before the shared-store fix; `hf-xfer sync --execute` relinks it)")

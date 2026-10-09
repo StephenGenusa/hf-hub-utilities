@@ -47,6 +47,9 @@ def _parser() -> argparse.ArgumentParser:
                            help="apply a plan that removes every entry sync owns in a view")
         if name == "remove":
             p.add_argument("--foreign", action="store_true", help="delete a foreign (non-owned) item")
+    p = vs.add_parser("clean", help="remove links into the HF cache whose target is gone (not ones sync owns)")
+    view_opt(p)
+    execute_opt(p, "delete")
     p = vs.add_parser("adopt", help="move or copy a foreign file into the HF cache, then sync")
     p.add_argument("key", help="foreign key as printed by `view status`")
     p.add_argument("--repo-id", required=True, help="<org/name> to file it under")
@@ -141,6 +144,8 @@ def xfer_main(argv: list[str] | None = None) -> int:
                 adopt.remove_foreign(config, args.key, views, execute=args.execute)
             else:
                 sync.view_remove(config, args.key, views, execute=args.execute, out=print)
+        elif args.vcmd == "clean":
+            sync.clean(config, views, execute=args.execute, out=print)
         elif args.vcmd == "adopt":
             from hfhub import adopt
             adopt.run(config, args.key, args.repo_id, views, move=args.move, execute=args.execute)

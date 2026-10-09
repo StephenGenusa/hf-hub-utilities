@@ -105,6 +105,7 @@ hf-xfer view add     <org/name>:<relpath> [--view ...] [--allow-mass-removal] [-
 hf-xfer view remove  <org/name>:<relpath> [--view ...] [--execute]
 hf-xfer view remove  --foreign <foreign key> [--view ...] [--execute]
 hf-xfer view adopt   <foreign key> --repo-id <org/name> [--move] [--execute]
+hf-xfer view clean   [--view ...] [--execute]
 hf-xfer dupes        [--view ...]
 hf-xfer verify       [--view ...] [--hub]
 
@@ -234,7 +235,18 @@ foreign file into a link.
 architecture, quant type, and parameter count, and lists likely matches; it
 never acts. `view remove --foreign <key> --execute` deletes one foreign item:
 the file for LM Studio, the manifest plus any blob no other manifest references
-for Ollama. It is the only command that deletes something sync did not create.
+for Ollama. Apart from `view clean`, it is the only command that deletes
+something sync did not create.
+
+`view clean` removes links in a view that point into the HF cache at a file
+that is no longer there: what is left behind when cache content is deleted
+under a link sync does not own (`hf cache prune`, `hf cache rm`, a link made
+by hand or by an older layout). Links that still resolve and links pointing
+outside the cache are never touched. A broken link sync does own is reported
+and left for `hf-xfer sync --execute`, which relinks or prunes it; deleting it
+directly would look like you deleting the model and record a tombstone. In
+Ollama, any manifest that used a removed blob is named, since that model no
+longer loads.
 
 ---
 
@@ -285,6 +297,43 @@ from the repo blob, and the deleting commands (`thin`, `prune-superseded`,
 `export --move`) let `huggingface_hub` collect a store file once no repo uses
 it. `cache gc` cleans up store files left behind by older versions of this tool
 or by deleting repo blobs by hand; `cache report` shows how much that is.
+
+---
+
+## Updating models
+
+`hf-xfer verify --hub` lists cached files the Hub has since replaced. To move a
+repo to its current revision and drop the old one:
+
+```bash
+hf download unsloth/gemma-4-12b-it-GGUF gemma-4-12b-it-Q4_K_M.gguf mmproj-F16.gguf  # every file you keep
+hf-xfer sync --execute                          # views move to the new files ("update")
+hf-xfer cache prune-superseded                  # dry run: the old versions it would delete
+hf-xfer cache prune-superseded --execute
+hf-xfer sync --execute
+hf-xfer view clean --execute                    # leftover links to what was deleted
+hf-xfer verify
+```
+
+- Name every file you keep in the repo, not only the changed ones. A new
+  revision's snapshot holds only the files requested at that revision; asking
+  for an unchanged file costs no download, it just links the blob already on
+  disk.
+- Sync before deleting anything. Entries move straight to the new file (aliases
+  included), so the model never drops out of LM Studio or Ollama.
+- Old and new versions sit side by side until the prune, so the free space
+  needed is the size of what changed. With little room, go one repo at a time.
+- `prune-superseded` deletes an old file only where the current revision has a
+  different file at the same path; files that exist only in an old revision are
+  kept. `hf cache prune` (from `huggingface_hub`) instead removes every
+  revision no ref points to, across the whole cache, including files the Hub
+  has since deleted or renamed, for which your copy may be the last one. Run it
+  with `--dry-run` first.
+- When the Hub renamed a file, the old name lives only in the old revision, so
+  `prune-superseded` keeps it and both names appear in the views. Once the new
+  name is in place, delete the old revision by its commit hash
+  (`hf cache ls --revisions` lists them): `hf cache rm <hash> --dry-run`, then
+  without `--dry-run`. Then sync and `view clean`.
 
 ---
 

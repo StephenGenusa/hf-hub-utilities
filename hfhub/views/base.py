@@ -27,9 +27,13 @@ def link_into_cache(link: Path, cache_target: Path) -> bool:
     same hub, dangling or not, is a link sync (or an earlier mirror tool) made to a cache
     file; anything else is the user's and is left alone.
     """
+    return link_into_hub(link, cache_target.parent.parent.parent)
+
+
+def link_into_hub(link: Path, hub: Path) -> bool:
+    """True when `link` is a symlink whose target, dangling or not, lies inside `hub`."""
     if not link.is_symlink():
         return False
-    hub = cache_target.parent.parent.parent
     where = os.path.normpath(os.path.join(os.path.dirname(link), read_link(link)))
     roots = {os.path.normpath(hub), os.path.realpath(hub)}
     return any(where.startswith(r + os.sep) for r in roots)

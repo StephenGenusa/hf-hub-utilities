@@ -30,8 +30,8 @@ def test_view_status_default_all_views(monkeypatch):
 
 def test_hfu_no_sync_flag_is_own_option():
     from hfhub.hfu import _split_own_args
-    own, extra = _split_own_args(["org/name", "--no-sync", "--revision", "main"])
-    assert "--no-sync" in own and extra == ["--revision", "main"]
+    own, extra = _split_own_args(["org/name", "--no-sync", "--local-dir", "./x"])
+    assert "--no-sync" in own and extra == ["--local-dir", "./x"]
 
 
 def test_help_lists_import_and_export():
@@ -80,3 +80,13 @@ def test_cache_commands_dispatch_and_default_to_dry_run(monkeypatch, tmp_path):
 def test_cache_commands_refuse_missing_hub(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.sync, "hub_dir", lambda: tmp_path / "nope")
     assert cli.xfer_main(["cache", "report"]) == 2
+
+
+def test_cache_fetch_assets_threads_repos_and_execute(monkeypatch, tmp_path):
+    from hfhub import cache_ops
+    seen = {}
+    monkeypatch.setattr(cli.sync, "hub_dir", lambda: tmp_path)
+    monkeypatch.setattr(cache_ops, "fetch_assets",
+                        lambda hub, execute, repos=None, out=print: seen.update(hub=hub, execute=execute, repos=repos))
+    assert cli.xfer_main(["cache", "fetch-assets", "--repo", "o/a", "--repo", "o/b", "--execute"]) == 0
+    assert seen == {"hub": tmp_path, "execute": True, "repos": ["o/a", "o/b"]}

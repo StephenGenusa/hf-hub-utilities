@@ -8,7 +8,9 @@ LM Studio and Ollama use it directly.
 | `hfu` | Download any Hub repo from a URL, path, or `org/name`, with a quant picker for GGUF repos, then refresh the views |
 | `hf-xfer` | Translate between a `--local-dir` copy and the hub cache; maintain the LM Studio and Ollama views; maintain the cache itself |
 
-Everything that writes is a dry run unless you pass `--execute`.
+Every `hf-xfer` command that writes is a dry run unless you pass `--execute`.
+`hfu` downloads straight away, like `hf download`; `--dry-run --no-sync`
+previews the download without writing anything.
 
 ---
 
@@ -43,18 +45,19 @@ cd hf-hub-utilities
 uv pip install -e .
 ```
 
-`hfu` shells out to the `hf` CLI:
+This installs `hfu` and `hf-xfer`, plus the `hf` CLI that `hfu` runs, which
+comes with the `huggingface-hub` dependency.
 
-```bash
-pip install "huggingface_hub[cli]"      # or: curl -LsSf https://hf.co/cli/install.sh | bash
-```
+The tools run on Linux, macOS and Windows. The cache and both views are built
+from symlinks, so on Windows turn on Developer Mode (or run as administrator)
+to allow creating them. The Ollama service setup below is for Linux.
 
 ---
 
 ## `hfu` — download into the cache
 
 ```
-hfu <url_or_path> [-q QUANT ...] [--mmproj MODE] [--no-sync] [hf download options...]
+hfu <url_or_path> [-q QUANT ...] [--mmproj MODE] [--revision REV] [--no-sync] [hf download options...]
 ```
 
 Accepts `https://huggingface.co/<org>/<name>`, `https://hf.co/...`, `org/name`,
@@ -62,25 +65,33 @@ and `datasets/…`, `models/…`, `spaces/…` prefixes. Files land in the hub c
 exactly as `hf download` would put them.
 
 For GGUF repos it lists the quants with sizes and prompts for a choice; with
-`-q` it skips the prompt. The matching `mmproj` file is added for vision
-models (`--mmproj F16|BF16|F32|all|none`, default F16 > BF16 > F32), and
-`README.md` comes along when present. Files are requested by exact name, never
-by glob.
+`-q` it skips the prompt. The picker marks quants already in the cache:
+`✓ cached`, `partial (n/m)` for a sharded quant with some shards missing, or
+`↻ update available` when the Hub now serves different bytes for that file.
 
-The picker marks quants already in the hub cache by comparing each file's Hub
-hash with the local blobs: `✓ cached` when the Hub's current version is on
-disk, `↻ update available` when a cached file differs from what the Hub serves
-now, and `partial (n/m)` when only some shards are present.
+The matching `mmproj` file is added for vision models (`--mmproj
+F16|BF16|F32|all|none`, default F16 > BF16 > F32), and `README.md` comes along
+when present, together with every image, audio and video file in the repo
+(`.png`, `.jpg`, `.svg`, `.mp3`, `.wav`, `.mp4`, ...), so the model card's
+pictures and samples work offline. Files are requested by exact name, never by
+glob. Repos without GGUF files, and datasets and spaces, are downloaded whole.
+
+`--revision` (branch, tag or commit) applies to both the quant listing and the
+download, so the picker shows the files that exist at that revision.
 
 ```bash
 hfu unsloth/Qwen3.6-35B-A3B-GGUF                 # interactive picker
 hfu unsloth/Qwen3.6-35B-A3B-GGUF -q UD-Q4_K_S    # scripted
 hfu unsloth/Qwen3.6-35B-A3B-GGUF -q Q8_0,UD-Q4_K_S --dry-run
+hfu unsloth/Qwen3.6-35B-A3B-GGUF -q Q8_0 --revision v2  # quants as of a branch or tag
 hfu https://huggingface.co/zai-org/GLM-OCR       # non-GGUF repo, downloaded whole
 ```
 
 After a successful download `hfu` runs `hf-xfer sync --execute` so the new
 model appears in LM Studio and Ollama; `--no-sync` skips that.
+
+For GGUF repos downloaded before `hfu` fetched assets, run
+`hf-xfer cache fetch-assets` (see [Cache maintenance](#cache-maintenance)).
 
 ---
 
@@ -89,7 +100,7 @@ model appears in LM Studio and Ollama; `--no-sync` skips that.
 ```
 hf-xfer sync   [--view lmstudio|ollama] [--execute] [--offline] [--allow-mass-removal]
 hf-xfer view status  [--view ...]
-hf-xfer view add     <org/name>:<relpath> [--view ...] [--execute]
+hf-xfer view add     <org/name>:<relpath> [--view ...] [--allow-mass-removal] [--execute]
 hf-xfer view remove  <org/name>:<relpath> [--view ...] [--execute]
 hf-xfer view remove  --foreign <foreign key> [--view ...] [--execute]
 hf-xfer view adopt   <foreign key> --repo-id <org/name> [--move] [--execute]
@@ -100,14 +111,18 @@ hf-xfer cache repair            [--execute]
 hf-xfer cache dedupe            [--execute]
 hf-xfer cache prune-superseded  [--execute]
 hf-xfer cache thin --min-quant IQ4_XS --max-size 23G [--repo org/name ...] [--allow-empty] [--execute]
+hf-xfer cache fetch-assets      [--repo org/name ...] [--execute]
 
-hf-xfer import --local-dir <path> [--repo-id ...] [--move|--hardlink] [--offline] [--execute]
-hf-xfer export --local-dir <path> [--repo-id ...] [--move|--hardlink] [--execute]
+hf-xfer import --local-dir <path> [--repo-id ...] [--repo-type ...] [--revision ...] [--cache-dir ...]
+               [--move|--hardlink] [--offline] [--no-verify] [--execute]
+hf-xfer export --local-dir <path> [--repo-id ...] [--repo-type ...] [--revision ...] [--cache-dir ...]
+               [--move|--hardlink] [--execute]
 ```
 
 ### Configuration
 
-`~/.config/hfhub/config.toml` (or `$HFHUB_CONFIG`):
+`~/.config/hfhub/config.toml` on every platform (on Windows,
+`%USERPROFILE%\.config\hfhub\config.toml`), or the path in `$HFHUB_CONFIG`:
 
 ```toml
 [views.lmstudio]
@@ -218,11 +233,12 @@ removed entries.
 
 | Command | What it does |
 |---------|--------------|
-| `cache report` | Sizes each category below plus the repos holding 4+ quants of one model |
+| `cache report` | How much `prune-superseded`, `dedupe` and `repair` would act on, the size of partial downloads (`*.incomplete`), and the repos holding 4+ quants of one model (candidates for `thin`) |
 | `cache repair` | Recreates snapshot links for blobs nothing references, matching SHA-256 and size against the repo's current Hub revision. Blobs the Hub no longer lists are left alone. |
 | `cache dedupe` | Hardlinks identical blobs stored under several repos; turns plain-file copies inside snapshot folders into links (moving the bytes into `blobs/` if needed). No data is lost. |
 | `cache prune-superseded` | Deletes blobs that only an older snapshot links where `refs/main` now links a different blob at the same path. Files that exist only in an old snapshot are kept. |
 | `cache thin` | Deletes quants below `--min-quant` or above `--max-size`, in repos where at least one quant survives (`--allow-empty` overrides). MTP draft files and mmproj files are never touched. |
+| `cache fetch-assets` | Downloads the image, audio and video files (the pictures and samples a README shows) that cached model repos lack, at the commit already in the cache, so nothing else is updated. For GGUF repos downloaded before `hfu` fetched assets. Dataset repos are skipped: their images are usually the data. |
 
 ```bash
 hf-xfer cache report
@@ -230,6 +246,7 @@ hf-xfer cache repair --execute
 hf-xfer cache dedupe --execute
 hf-xfer cache prune-superseded --execute
 hf-xfer cache thin --min-quant IQ4_XS --max-size 23G --execute
+hf-xfer cache fetch-assets --execute
 hf-xfer sync --execute
 ```
 
@@ -292,9 +309,29 @@ hf-xfer import --local-dir ~/models/google/gemma-3-4b-it --move --execute
 hf-xfer export --local-dir ~/export/gemma --repo-id google/gemma-3-4b-it --execute
 ```
 
-`--repo-id` defaults to the last two path components of `--local-dir`. The
+`--repo-id` defaults to the last two path components of `--local-dir`.
+`--repo-type` is `model`, `dataset` or `space` (default `model`); `--revision`
+is a branch, tag or commit (default `main`). After an import, `hf download`
+checks the repo is complete unless `--no-verify` is given. The
 cache directory resolves as `--cache-dir` > `HF_HUB_CACHE` >
 `HUGGINGFACE_HUB_CACHE` > `HF_HOME/hub` > `~/.cache/huggingface/hub`.
+
+### Moving models to another machine
+
+Copying `models--*` folders directly does not work on most USB drives: the
+snapshot files are symlinks, which exFAT and FAT32 cannot store. Export to the
+drive, then import on the other machine:
+
+```bash
+# this machine
+hf-xfer export --local-dir /mnt/usb/hf/unsloth/Qwen3.6-27B-GGUF --repo-id unsloth/Qwen3.6-27B-GGUF --execute
+# the other machine; --repo-id comes from the path, --offline if it has no network
+hf-xfer import --local-dir /mnt/usb/hf/unsloth/Qwen3.6-27B-GGUF --execute
+hf-xfer sync --execute
+```
+
+Format the drive as exFAT or NTFS, not FAT32: many GGUF files are over 4 GB.
+Pass `--repo-type dataset` on both sides for a dataset.
 
 ---
 
@@ -307,12 +344,21 @@ HFHUB_LIVE=1 python -m pytest -q -k live              # hits huggingface.co
 HFHUB_OLLAMA=1 python -m pytest tests/test_ollama_integration.py -q   # starts a scratch ollama serve
 ```
 
-Layout: `hfhub/cache.py` scans the cache; `views/base.py` holds the pure
-reconcile table and the single write path; `views/lmstudio.py` and
-`views/ollama.py` are the two views; `ollama_registry.py` talks to the
-registry endpoint; `sync.py` drives it; `adopt.py`, `dupes.py`, and
-`cache_ops.py` are the maintenance commands; `xfer.py` and `hfu.py` are the
-original tools.
+The suite passes on Linux and Windows. Code that builds a path inside a repo or
+a view uses `/` on every platform (`Path.as_posix()`), because Hub filenames,
+view keys, aliases and registry tags all use `/`. Read links with
+`cache.read_link`, not `os.readlink`, which on Windows adds a `\\?\` prefix.
+
+Layout, all under `hfhub/`: `cli.py` is the `hf-xfer` command line;
+`cache.py` scans the cache; `config.py` reads and edits the config file;
+`state.py` keeps each view's ownership and tombstone record
+(`<view root>/.hfhub-state.json`); `views/base.py` holds the pure reconcile
+table and the single write path; `views/lmstudio.py` and `views/ollama.py` are
+the two views; `ollama_registry.py` talks to the registry endpoint;
+`gguf_header.py` reads GGUF metadata; `sync.py` drives the views; `adopt.py`,
+`dupes.py`, and `cache_ops.py` are the maintenance commands; `xfer.py`
+(import/export) and `hfu.py` are the original tools. `hfu.py` and `hf_xfer.py`
+at the repo root are shims for running from a checkout without installing.
 
 ## License
 

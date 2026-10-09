@@ -9,7 +9,7 @@ import urllib.parse
 from pathlib import Path
 
 from hfhub import ollama_registry as reg
-from hfhub.cache import GgufEntry, mmproj_for, weights
+from hfhub.cache import GgufEntry, mmproj_for, read_link, weights
 from hfhub.gguf_header import read_header
 from hfhub.state import State
 from hfhub.views.base import Desired, ForeignItem, Presence, SkipEntry
@@ -98,7 +98,7 @@ class OllamaView:
     def _link_status(self, rel: str, target: Path) -> str:
         p = self.root / rel
         if p.is_symlink():
-            current = os.readlink(p)
+            current = read_link(p)
             # The same bytes can live in several HF repos (identical mmproj or
             # MTP files); the blob path is keyed by sha, so a link to any copy
             # of the same sha is correct.
@@ -313,7 +313,7 @@ class OllamaView:
         if not mroot.is_dir():
             return out
         for p in sorted(x for x in mroot.rglob("*") if x.is_file()):
-            rel = str(p.relative_to(self.root))
+            rel = p.relative_to(self.root).as_posix()
             if rel in owned:
                 continue
             parts = p.relative_to(mroot).parts  # registry, ns, name, tag

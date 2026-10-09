@@ -133,3 +133,62 @@ def test_report_lists_categories(tmp_path: Path):
     ops.report(hub, out=msgs.append)
     text = "\n".join(msgs)
     assert "superseded" in text and "identical" in text and "unlinked" in text and "4 quants  o/r" in text
+
+
+# ---------------------------------------------------------------- fetch-assets
+def _listing(files):
+    from hfhub.hfu import RepoFile
+    return lambda rid, commit: [RepoFile(p, n) for p, n in files]
+
+
+def test_fetch_assets_dry_run_lists_missing_media_at_the_cached_commit(tmp_path: Path):
+    hub = tmp_path / "hub"
+    commit = add_repo(hub, "o/r", {"m-Q4_K_M.gguf": b"w", "README.md": b"r", "assets/have.png": b"p"})
+    seen, got = [], []
+    lister = lambda rid, c: seen.append((rid, c)) or _listing(
+        [("m-Q4_K_M.gguf", 1), ("README.md", 1), ("assets/have.png", 1),
+         ("assets/banner.png", 300), ("samples/voice.mp3", 700), ("config.json", 5)])(rid, c)
+    msgs = []
+    res = ops.fetch_assets(hub, execute=False, out=msgs.append, list_fn=lister,
+                           download_fn=lambda *a: got.append(a))
+    assert seen == [("o/r", commit)]
+    assert res.actions == 2 and res.bytes == 1000 and got == []
+    assert any("o/r:assets/banner.png" in m for m in msgs)
+    assert not any("have.png" in m or "config.json" in m for m in msgs)
+
+
+def test_fetch_assets_execute_downloads_per_repo(tmp_path: Path):
+    hub = tmp_path / "hub"
+    commit = add_repo(hub, "o/r", {"m.gguf": b"w"})
+    got = []
+    ops.fetch_assets(hub, execute=True, out=lambda m: None,
+                     list_fn=_listing([("a.png", 1), ("b.wav", 1)]),
+                     download_fn=lambda rid, c, paths: got.append((rid, c, paths)))
+    assert got == [("o/r", commit, ["a.png", "b.wav"])]
+
+
+def test_fetch_assets_repo_filter_and_listing_failure(tmp_path: Path):
+    hub = tmp_path / "hub"
+    add_repo(hub, "o/a", {"m.gguf": b"1"})
+    add_repo(hub, "o/b", {"m.gguf": b"2"})
+    add_repo(hub, "o/c", {"m.gguf": b"3"})
+
+    def lister(rid, commit):
+        if rid == "o/b":
+            raise OSError("gated")
+        return _listing([("x.png", 1)])(rid, commit)
+
+    res = ops.fetch_assets(hub, execute=False, repos=["o/a", "o/b"], out=lambda m: None, list_fn=lister)
+    assert res.actions == 1
+    assert any("o/b" in n and "gated" in n for n in res.notes)
+
+
+def test_fetch_assets_without_refs_main_uses_newest_snapshot(tmp_path: Path):
+    hub = tmp_path / "hub"
+    old = add_repo(hub, "o/r", {"m.gguf": b"1"}, commit="a" * 40, main=False)
+    new = add_repo(hub, "o/r", {"m.gguf": b"2"}, commit="b" * 40, main=False)
+    os.utime(hub / "models--o--r" / "snapshots" / old, (1, 1))
+    seen = []
+    ops.fetch_assets(hub, execute=False, out=lambda m: None,
+                     list_fn=lambda rid, c: seen.append(c) or [])
+    assert seen == [new]

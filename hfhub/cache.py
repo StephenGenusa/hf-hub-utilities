@@ -10,6 +10,15 @@ from hfhub.hfu import _SHARD_SUFFIX, is_mmproj, pick_mmproj
 _HEX = set("0123456789abcdef")
 
 
+def read_link(p: Path) -> str:
+    r"""os.readlink without the \\?\ prefix Windows adds to absolute targets,
+    so the result compares equal to the str(Path) the link was made from."""
+    t = os.readlink(p)
+    if t.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + t[8:]
+    return t[4:] if t.startswith("\\\\?\\") else t
+
+
 @dataclass(frozen=True)
 class GgufEntry:
     repo_id: str
@@ -64,7 +73,7 @@ def scan(hub: Path) -> list[GgufEntry]:
         seen: set[str] = set()
         for snap, is_main in _snapshots_in_order(repo_root):
             for link in sorted(snap.rglob("*.gguf")):
-                rel = str(link.relative_to(snap))
+                rel = link.relative_to(snap).as_posix()
                 if rel in seen or not link.is_symlink():
                     continue
                 blob = Path(os.path.realpath(link))

@@ -53,3 +53,12 @@ def test_mmproj_for_prefers_f16(tmp_path: Path):
 def test_repo_folder_roundtrip():
     assert cache.repo_folder("unsloth/Qwen3.6-27B-GGUF") == "models--unsloth--Qwen3.6-27B-GGUF"
     assert cache.repo_id_from_folder("models--unsloth--Qwen3.6-27B-GGUF") == "unsloth/Qwen3.6-27B-GGUF"
+
+
+def test_read_link_strips_windows_extended_path_prefix(monkeypatch):
+    import os
+    for raw, want in [(r"\\?\C:\hub\blobs\ab", r"C:\hub\blobs\ab"),
+                      (r"\\?\UNC\srv\share\ab", r"\\srv\share\ab"),
+                      ("../../blobs/ab", "../../blobs/ab")]:
+        monkeypatch.setattr(os, "readlink", lambda p, raw=raw: raw)
+        assert cache.read_link(Path("x")) == want

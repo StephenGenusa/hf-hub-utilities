@@ -171,6 +171,30 @@ class TestBuildCommand:
         assert cmd == ["hf", "download", "org/m", "a.gguf", "--revision", "v2", "--dry-run"]
 
 
+class TestBuildCommandRevision:
+    def test_revision_follows_filenames_before_passthrough(self):
+        cmd = hfu.build_command("org/m", "model", ["a.gguf"], ["--dry-run"], revision="v2")
+        assert cmd == ["hf", "download", "org/m", "a.gguf", "--revision", "v2", "--dry-run"]
+
+    def test_no_revision_flag_when_unset(self):
+        assert "--revision" not in hfu.build_command("org/m", "model", [], [])
+
+
+class TestFetchRepoFiles:
+    def test_lists_files_at_the_requested_revision(self, monkeypatch):
+        import huggingface_hub
+        calls = {}
+
+        class FakeApi:
+            def repo_info(self, repo_id, **kw):
+                calls.update(kw, repo_id=repo_id)
+                return type("Info", (), {"siblings": []})()
+
+        monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+        hfu.fetch_repo_files("org/m", "model", revision="v2")
+        assert calls["revision"] == "v2" and calls["repo_id"] == "org/m"
+
+
 class TestParseArgs:
     def test_defaults(self):
         ns, extra = hfu.parse_args(["org/m"])
@@ -186,9 +210,18 @@ class TestParseArgs:
         assert ns.mmproj == "all"
 
     def test_unknown_options_and_their_values_pass_through_in_order(self):
-        ns, extra = hfu.parse_args(["org/m", "--revision", "v2", "-q", "Q8_0", "--local-dir", "./x", "--dry-run"])
+        ns, extra = hfu.parse_args(["org/m", "--include", "*.json", "-q", "Q8_0", "--local-dir", "./x", "--dry-run"])
         assert ns.quant == ["Q8_0"]
-        assert extra == ["--revision", "v2", "--local-dir", "./x", "--dry-run"]
+        assert extra == ["--include", "*.json", "--local-dir", "./x", "--dry-run"]
+
+    @pytest.mark.parametrize("argv", [["org/m", "--revision", "v2"], ["org/m", "--revision=v2"]])
+    def test_revision_is_parsed_not_passed_through(self, argv):
+        ns, extra = hfu.parse_args(argv)
+        assert ns.revision == "v2" and extra == []
+
+    def test_revision_defaults_to_none(self):
+        ns, _ = hfu.parse_args(["org/m"])
+        assert ns.revision is None
 
 
 class TestFormatSize:
@@ -219,6 +252,19 @@ class TestPlanFilenames:
         files = [RepoFile("m-Q4_K_M.gguf", 1), RepoFile("m-Q8_0.gguf", 2)]
         [q4, _] = hfu.group_quants(files)
         assert hfu.plan_filenames(files, [q4], mmproj_mode="all") == ["m-Q4_K_M.gguf"]
+
+    def test_media_assets_anywhere_in_repo_follow_readme(self):
+        files = [RepoFile("assets/banner.PNG", 1), RepoFile("m-Q4_K_M.gguf", 1), RepoFile("README.md", 1),
+                 RepoFile("samples/voice.mp3", 1), RepoFile("demo.mp4", 1), RepoFile("logo.svg", 1)]
+        [q4] = hfu.group_quants(files)
+        assert hfu.plan_filenames(files, [q4], mmproj_mode=None) == [
+            "m-Q4_K_M.gguf", "README.md", "assets/banner.PNG", "samples/voice.mp3", "demo.mp4", "logo.svg"]
+
+    def test_non_media_files_are_not_assets(self):
+        files = [RepoFile("m-Q4_K_M.gguf", 1), RepoFile("config.json", 1), RepoFile("imatrix.dat", 1),
+                 RepoFile("model.safetensors", 1), RepoFile(".gitattributes", 1)]
+        [q4] = hfu.group_quants(files)
+        assert hfu.plan_filenames(files, [q4], mmproj_mode=None) == ["m-Q4_K_M.gguf"]
 
     def test_readme_only_when_present_case_insensitive(self):
         files = [RepoFile("m-Q4_K_M.gguf", 1), RepoFile("readme.md", 1)]

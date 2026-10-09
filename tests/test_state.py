@@ -56,3 +56,15 @@ def test_tombstones_as_list_raises(tmp_path: Path):
         {"version": 1, "owned": {}, "tombstones": ["a/b:c.gguf"]}))
     with pytest.raises(st.StateError):
         st.load(tmp_path)
+
+
+def test_backslash_keys_from_older_windows_runs_are_normalised(tmp_path: Path):
+    (tmp_path / st.STATE_FILE).write_text(json.dumps({
+        "version": 1,
+        "owned": {r"o/r:sub\m.gguf": {"paths": [r"o/r/sub\m.gguf"], "sha256": "ab"}},
+        "tombstones": {r"o/r:sub\n.gguf": "2026-01-01"},
+    }))
+    s = st.load(tmp_path)
+    assert list(s.owned) == ["o/r:sub/m.gguf"]
+    assert s.owned["o/r:sub/m.gguf"].paths == ["o/r/sub/m.gguf"]
+    assert s.tombstones == {"o/r:sub/n.gguf": "2026-01-01"}

@@ -57,7 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     d = sub.add_parser("dupes", help="list foreign files that look like cache entries")
     view_opt(d)
 
-    c = sub.add_parser("cache", help="maintain the HF cache itself (report/repair/dedupe/prune-superseded/thin)")
+    c = sub.add_parser("cache", help="maintain the HF cache itself (report/repair/dedupe/prune-superseded/thin/fetch-assets)")
     cs = c.add_subparsers(dest="ccmd", required=True)
     cs.add_parser("report", help="how much each maintenance command could reclaim")
     p = cs.add_parser("repair", help="recreate snapshot links for blobs that nothing references"); execute_opt(p, "create links")
@@ -69,6 +69,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--repo", action="append", metavar="ORG/NAME", help="limit to a repo (repeatable)")
     p.add_argument("--allow-empty", action="store_true", help="allow a repo to lose its last quant")
     execute_opt(p, "delete")
+    p = cs.add_parser("fetch-assets", help="download README images, audio and video that cached model repos lack")
+    p.add_argument("--repo", action="append", metavar="ORG/NAME", help="limit to a repo (repeatable)")
+    execute_opt(p, "download")
 
     # Intercepted in xfer_main before argparse ever sees them; they are here so
     # that `hf-xfer --help` lists every command the tool actually has.
@@ -99,6 +102,8 @@ def _cache_cmd(args) -> int:
                        min_bits=cache_ops.parse_min_quant(args.min_quant) if args.min_quant else None,
                        max_size=cache_ops.parse_size(args.max_size) if args.max_size else None,
                        repos=args.repo, allow_empty=args.allow_empty, out=print)
+    elif args.ccmd == "fetch-assets":
+        cache_ops.fetch_assets(hub, execute=args.execute, repos=args.repo, out=print)
     return 0
 
 

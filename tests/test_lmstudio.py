@@ -1,7 +1,7 @@
-import os
 from pathlib import Path
 
 from hfhub import cache
+from hfhub.cache import read_link
 from hfhub.state import Owned, State
 from hfhub.views.base import Presence
 from hfhub.views.lmstudio import LmStudioView
@@ -30,7 +30,7 @@ def test_create_present_remove_cycle(tmp_path: Path):
     paths = view.create(d)
     assert sorted(paths) == sorted(d.links)
     link = view.root / "org/M-GGUF/M-Q4_K_M.gguf"
-    assert link.is_symlink() and os.readlink(link) == str(d.links["org/M-GGUF/M-Q4_K_M.gguf"])
+    assert link.is_symlink() and read_link(link) == str(d.links["org/M-GGUF/M-Q4_K_M.gguf"])
     assert view.present(d) is Presence.CORRECT
     view.remove(paths)
     assert not (view.root / "org").exists()

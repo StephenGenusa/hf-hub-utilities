@@ -147,7 +147,7 @@ def report(hub: Path, out: Out = print) -> None:
         ref = _main_ref(repo)
         main_paths = {}
         if ref and (repo / "snapshots" / ref).is_dir():
-            main_paths = {str(l.relative_to(repo / "snapshots" / ref)): b for s, l, b in _links(repo) if s.name == ref}
+            main_paths = {l.relative_to(repo / "snapshots" / ref).as_posix(): b for s, l, b in _links(repo) if s.name == ref}
         for b in blobs:
             sz = b.stat().st_size
             seen_inodes[b.name].add(b.stat().st_ino)
@@ -158,7 +158,7 @@ def report(hub: Path, out: Out = print) -> None:
             elif ref and ref not in linked_by[b.name]:
                 # superseded only if some path in main now points at a different blob
                 for s, l, bb in _links(repo):
-                    if bb == b.name and str(l.relative_to(s)) in main_paths and main_paths[str(l.relative_to(s))] != b.name:
+                    if bb == b.name and l.relative_to(s).as_posix() in main_paths and main_paths[l.relative_to(s).as_posix()] != b.name:
                         sup += sz
                         break
         for p in (repo / "blobs").glob("*.incomplete"):
@@ -263,7 +263,7 @@ def dedupe(hub: Path, execute: bool, out: Out = print) -> Result:
                 continue  # small config/json files are legitimately plain in some layouts
             sha = file_sha256(f)
             blob = repo / "blobs" / sha
-            rel = str(f.relative_to(snaps / f.relative_to(snaps).parts[0]))
+            rel = f.relative_to(snaps / f.relative_to(snaps).parts[0]).as_posix()
             res.actions += 1
             if blob.exists():
                 res.bytes += f.stat().st_size
@@ -290,13 +290,13 @@ def prune_superseded(hub: Path, execute: bool, out: Out = print) -> Result:
         snaps = repo / "snapshots"
         if not ref or not (snaps / ref).is_dir():
             continue
-        main = {str(l.relative_to(snaps / ref)): b for s, l, b in _links(repo) if s.name == ref}
+        main = {l.relative_to(snaps / ref).as_posix(): b for s, l, b in _links(repo) if s.name == ref}
         main_blobs = set(main.values())
         victims: dict[str, list[Path]] = defaultdict(list)
         for s, l, b in _links(repo):
             if s.name == ref or b in main_blobs:
                 continue
-            rel = str(l.relative_to(s))
+            rel = l.relative_to(s).as_posix()
             if rel in main:
                 victims[b].append(l)
         for b, links in victims.items():
@@ -304,7 +304,7 @@ def prune_superseded(hub: Path, execute: bool, out: Out = print) -> Result:
             sz = blob.stat().st_size if blob.exists() else 0
             res.actions += 1
             res.bytes += sz
-            rel = str(links[0].relative_to(snaps / links[0].relative_to(snaps).parts[0]))
+            rel = links[0].relative_to(snaps / links[0].relative_to(snaps).parts[0]).as_posix()
             out(f"  {'deleted' if execute else 'would delete'} {sz / GB:5.1f} GB  {_repo_id(repo)}:{rel}")
             if execute:
                 for l in links:
@@ -318,6 +318,68 @@ def prune_superseded(hub: Path, execute: bool, out: Out = print) -> Result:
     out(res.summary("prune", execute))
     if execute and res.actions:
         out("run `hf-xfer sync --execute` to prune the views")
+    return res
+
+
+# ---------------------------------------------------------------- fetch assets
+def _cached_commit(repo_dir: Path) -> str | None:
+    """The snapshot the cache treats as current: refs/main, else the newest snapshot folder."""
+    ref = _main_ref(repo_dir)
+    snaps = repo_dir / "snapshots"
+    if ref and (snaps / ref).is_dir():
+        return ref
+    dirs = [d for d in snaps.iterdir() if d.is_dir()] if snaps.is_dir() else []
+    return max(dirs, key=lambda d: d.stat().st_mtime).name if dirs else None
+
+
+def _list_repo_files(repo_id: str, commit: str):
+    from hfhub.hfu import fetch_repo_files
+    return fetch_repo_files(repo_id, "model", revision=commit)
+
+
+def _download_files(hub: Path) -> Callable[[str, str, list[str]], None]:
+    def download(repo_id: str, commit: str, paths: list[str]) -> None:
+        from huggingface_hub import hf_hub_download
+        for p in paths:
+            hf_hub_download(repo_id, p, revision=commit, cache_dir=hub)
+    return download
+
+
+def fetch_assets(hub: Path, execute: bool, repos: list[str] | None = None, out: Out = print,
+                 list_fn: Callable = _list_repo_files,
+                 download_fn: Callable[[str, str, list[str]], None] | None = None) -> Result:
+    """Download the image, audio and video files cached model repos are missing, at the cached commit."""
+    from hfhub.hfu import is_media_asset
+    download_fn = download_fn or _download_files(hub)
+    res = Result()
+    for repo in sorted(hub.glob("models--*")):
+        rid = _repo_id(repo)
+        if repos and rid not in repos:
+            continue
+        commit = _cached_commit(repo)
+        if commit is None:
+            continue
+        try:
+            files = list_fn(rid, commit)
+        except Exception as e:  # network / 404 / gated
+            res.notes.append(f"{rid}: Hub lookup failed ({e}); left alone")
+            continue
+        snap = repo / "snapshots" / commit
+        missing = [f for f in files if is_media_asset(f.path) and not os.path.lexists(snap / f.path)]
+        if not missing:
+            continue
+        for f in missing:
+            res.actions += 1
+            res.bytes += f.size or 0
+            out(f"  {'fetched' if execute else 'would fetch'} {(f.size or 0) / 1e6:6.1f} MB  {rid}:{f.path}")
+        if execute:
+            try:
+                download_fn(rid, commit, [f.path for f in missing])
+            except Exception as e:
+                res.notes.append(f"{rid}: download failed ({e})")
+    for n in res.notes:
+        out(f"  note: {n}")
+    out(res.summary("fetch", execute))
     return res
 
 

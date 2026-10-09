@@ -58,7 +58,10 @@ def load(root: Path) -> State:
         isinstance(k, str) and isinstance(v, str) for k, v in raw_tombstones.items()
     ):
         raise StateError(f"{p}: malformed state file (tombstones must be an object of string to string)")
-    return State(owned=owned, tombstones=dict(raw_tombstones))
+    # Windows runs before paths were normalised wrote "sub\m.gguf"; Hub paths use "/".
+    fix = lambda s: s.replace("\\", "/")
+    owned = {fix(k): Owned(paths=[fix(x) for x in o.paths], sha256=o.sha256) for k, o in owned.items()}
+    return State(owned=owned, tombstones={fix(k): v for k, v in raw_tombstones.items()})
 
 
 def save(root: Path, state: State) -> None:

@@ -71,6 +71,18 @@ def is_mmproj(path: str) -> bool:
     return is_gguf(path) and "mmproj" in os.path.basename(path).lower()
 
 
+_MEDIA_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".avif",
+    ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".opus",
+    ".mp4", ".webm", ".mov",
+}
+
+
+def is_media_asset(path: str) -> bool:
+    """Image, audio or video file, such as the pictures and samples a model card shows."""
+    return os.path.splitext(path)[1].lower() in _MEDIA_EXTENSIONS
+
+
 def _stem(path: str) -> str:
     """Basename without .gguf extension and without a -0000N-of-0000M shard suffix."""
     base = os.path.basename(path)
@@ -206,7 +218,8 @@ def plan_filenames(files: list[RepoFile], quants: list[Quant], mmproj_mode: str 
     """
     Final list of repo paths to download for the chosen quants:
     quant shards, then the selected mmproj file(s) (vision models only),
-    then README.md if the repo has one.
+    then README.md if the repo has one, then every media asset in the repo
+    (images, audio, video) so the model card renders offline.
     """
     names: list[str] = []
     for q in quants:
@@ -216,6 +229,7 @@ def plan_filenames(files: list[RepoFile], quants: list[Quant], mmproj_mode: str 
     readme = next((f.path for f in files if f.path.lower() == "readme.md"), None)
     if readme:
         names.append(readme)
+    names += [f.path for f in files if is_media_asset(f.path)]
     return names
 
 
@@ -239,14 +253,17 @@ def format_size(n: int | None) -> str:
 # Command line
 # --------------------------------------------------------------------------- #
 
-def build_command(repo_id: str, repo_type: str, filenames: list[str], extra: list[str]) -> list[str]:
+def build_command(repo_id: str, repo_type: str, filenames: list[str], extra: list[str],
+                  revision: str | None = None) -> list[str]:
     cmd = ["hf", "download", repo_id, *filenames]
     if repo_type != "model":
         cmd += ["--repo-type", repo_type]
+    if revision:
+        cmd += ["--revision", revision]
     return cmd + list(extra)
 
 
-_OWN_OPTIONS_WITH_VALUE = {"-q", "--quant", "--mmproj"}
+_OWN_OPTIONS_WITH_VALUE = {"-q", "--quant", "--mmproj", "--revision"}
 _OWN_FLAGS = {"-h", "--help", "--no-sync"}
 
 
@@ -281,13 +298,15 @@ def parse_args(argv: list[str]):
         prog="hfu",
         description="Download a Hugging Face repo into the hub cache via `hf download`. "
                     "GGUF repos get an interactive quant picker (mmproj auto-included for vision models).",
-        epilog="Any other option (e.g. --revision, --local-dir, --dry-run) is passed straight to `hf download`.",
+        epilog="Any other option (e.g. --local-dir, --include, --dry-run) is passed straight to `hf download`.",
     )
     parser.add_argument("target", help="URL, org/name, or datasets|models|spaces/org/name")
     parser.add_argument("-q", "--quant", action="append", default=[], metavar="NAME",
                         help="quant to download (repeatable or comma-separated); skips the picker")
     parser.add_argument("--mmproj", default=None, metavar="MODE",
                         help="F16|BF16|F32|all|none (default: auto = F16 > BF16 > F32)")
+    parser.add_argument("--revision", default=None, metavar="REV",
+                        help="branch, tag or commit to list quants from and download (default: main)")
     parser.add_argument("--no-sync", action="store_true",
                         help="don't refresh LM Studio / Ollama views after the download")
     own, extra = _split_own_args(argv)
@@ -384,11 +403,11 @@ def probe_cache(hub, repo_id: str, files: list[RepoFile]) -> dict[str, str]:
 # IO: Hub lookup, picker, execution
 # --------------------------------------------------------------------------- #
 
-def fetch_repo_files(repo_id: str, repo_type: str) -> list[RepoFile]:
+def fetch_repo_files(repo_id: str, repo_type: str, revision: str | None = None) -> list[RepoFile]:
     """List every file in the repo with its size (one Hub API call)."""
     from huggingface_hub import HfApi
 
-    info = HfApi().repo_info(repo_id, repo_type=repo_type, files_metadata=True)
+    info = HfApi().repo_info(repo_id, repo_type=repo_type, revision=revision, files_metadata=True)
     return [RepoFile(s.rfilename, s.size, s.lfs.sha256 if s.lfs else s.blob_id)
             for s in (info.siblings or [])]
 
@@ -478,7 +497,7 @@ def main() -> None:
     filenames: list[str] = []
     if repo_type == "model":
         try:
-            files = fetch_repo_files(repo_id, repo_type)
+            files = fetch_repo_files(repo_id, repo_type, ns.revision)
         except Exception as e:  # network / auth / 404 — fall back to plain hf download
             print(f"⚠️  Could not list repo files ({type(e).__name__}: {e}); downloading whole repo", file=sys.stderr)
             files = []
@@ -495,7 +514,7 @@ def main() -> None:
         elif ns.quant or ns.mmproj:
             print("⚠️  -q/--mmproj ignored: repo has no .gguf files", file=sys.stderr)
 
-    cmd = build_command(repo_id, repo_type, filenames, extra)
+    cmd = build_command(repo_id, repo_type, filenames, extra, ns.revision)
 
     print(f"📦 Downloading {repo_type}: {repo_id}")
     if filenames:

@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from hfhub.cache import GgufEntry, mmproj_for, weights
+from hfhub.cache import GgufEntry, mmproj_for, read_link, weights
 from hfhub.state import State
 from hfhub.views.base import Desired, ForeignItem, Presence
 
@@ -47,7 +47,7 @@ class LmStudioView:
     def _status(self, rel: str, target: Path) -> str:
         p = self.root / rel
         if p.is_symlink():
-            return "ok" if os.readlink(p) == str(target) else "wrong"
+            return "ok" if read_link(p) == str(target) else "wrong"
         return "wrong" if p.exists() else "missing"
 
     def present(self, d: Desired) -> Presence:
@@ -66,7 +66,7 @@ class LmStudioView:
     def create(self, d: Desired) -> list[str]:
         for rel, target in d.links.items():
             p = self.root / rel
-            if p.is_symlink() and os.readlink(p) == str(target):
+            if p.is_symlink() and read_link(p) == str(target):
                 continue
             p.parent.mkdir(parents=True, exist_ok=True)
             p.symlink_to(target)
@@ -85,7 +85,7 @@ class LmStudioView:
         if not self.root.is_dir():
             return out
         for p in sorted(self.root.rglob("*.gguf")):
-            rel = str(p.relative_to(self.root))
+            rel = p.relative_to(self.root).as_posix()
             if rel in owned:
                 continue
             if p.is_symlink() or p.is_file():

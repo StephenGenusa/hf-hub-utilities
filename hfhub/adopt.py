@@ -82,17 +82,38 @@ def plan_adopt(item: ForeignItem, repo_id: str, sha256: str,
         note = f"hash not in {repo_id}@main; synthesised revision"
     else:
         note = f"{repo_id} not on the Hub; synthesised revision"
-    commit = hashlib.sha256(f"{repo_id}:{sha256}".encode()).hexdigest()[:40]
+    commit = synthesised_commit(repo_id, sha256)
     return AdoptPlan(repo_id, _foreign_filename(item), commit, sha256, False, note)
+
+
+def synthesised_commit(repo_id: str, sha256: str) -> str:
+    return hashlib.sha256(f"{repo_id}:{sha256}".encode()).hexdigest()[:40]
+
+
+def is_synthesised(repo_root: Path, repo_id: str, commit: str) -> bool:
+    """True when `commit` is a revision adopt made up rather than one from the Hub.
+
+    plan_adopt derives such a revision from repo_id + the file's sha256, so it is
+    recognised by recomputing that from the blobs the snapshot links.
+    """
+    snap = repo_root / "snapshots" / commit
+    if not snap.is_dir():
+        return False
+    for link in snap.rglob("*"):
+        if link.is_symlink() and synthesised_commit(repo_id, os.path.basename(os.readlink(link))) == commit:
+            return True
+    return False
 
 
 def execute_adopt(item: ForeignItem, plan: AdoptPlan, hub_dir: Path, move: bool) -> Path:
     """Put the file in the cache as blob + snapshot symlink (+ refs/main when free).
 
-    refs/main is never moved off a revision that is already there: it may be the
-    real Hub revision of a repo we are only adding one loose file to, and a
+    refs/main is never moved off a real Hub revision that is already there: it may
+    be the revision of a repo we are only adding one loose file to, and a
     redownload updates that snapshot, not ours. `cache.scan` walks every snapshot,
-    so the adopted file is found either way - just not flagged `is_current`.
+    so the adopted file is found either way - just not flagged `is_current`. The
+    one exception is a revision adopt synthesised itself: a Hub-backed adoption
+    moves refs/main off it to the real commit.
     """
     repo_root = hub_dir / cache.repo_folder(plan.repo_id)
     blob = repo_root / "blobs" / plan.etag
@@ -106,7 +127,9 @@ def execute_adopt(item: ForeignItem, plan: AdoptPlan, hub_dir: Path, move: bool)
         snap.symlink_to(target)
     (repo_root / "refs").mkdir(exist_ok=True)
     main = repo_root / "refs" / "main"
-    if not main.is_file() or main.read_text().strip() == plan.commit:
+    current = main.read_text().strip() if main.is_file() else None
+    if current is None or current == plan.commit or (
+            plan.hub_backed and is_synthesised(repo_root, plan.repo_id, current)):
         main.write_text(plan.commit)
     return snap
 
@@ -191,7 +214,10 @@ def run(config: cfg.Config, key: str, repo_id: str, view_names: list[str], move:
     main = hub / cache.repo_folder(plan.repo_id) / "refs" / "main"
     current = main.read_text().strip() if main.is_file() else plan.commit
     if current != plan.commit:
-        out(f"refs/main left at {current} (real Hub revision); "
+        repo_root = hub / cache.repo_folder(plan.repo_id)
+        kind = ("a revision synthesised by an earlier adopt"
+                if is_synthesised(repo_root, plan.repo_id, current) else "an existing revision")
+        out(f"refs/main left at {current} ({kind}); "
             f"adopted file lives in snapshot {plan.commit}")
     if view_name == "ollama":
         _seed_registry_cache(view.root, plan, item)

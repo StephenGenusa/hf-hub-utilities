@@ -11,8 +11,8 @@ from pathlib import Path
 from hfhub import ollama_registry as reg
 from hfhub.cache import GgufEntry, mmproj_for, read_link, weights
 from hfhub.gguf_header import read_header
-from hfhub.state import State
-from hfhub.views.base import Desired, ForeignItem, Presence, SkipEntry
+from hfhub.state import Owned, State
+from hfhub.views.base import Desired, ForeignItem, Presence, SkipEntry, link_into_cache
 from hfhub.views.lmstudio import remove_empty_parents
 
 REGISTRY_CACHE_DIR = ".hfhub-registry"
@@ -140,6 +140,31 @@ class OllamaView:
             return Presence.ABSENT
         return Presence.CORRECT if statuses == {"ok"} else Presence.PARTIAL
 
+    def is_stale(self, d: Desired, owned: Owned) -> bool:
+        """Our manifest for an older cache file, or for the same file with a changed projector.
+
+        The manifest's model layer must still be the one we wrote (the sha recorded at
+        the time) or the current one; every mismatching blob link must lead into the
+        cache. A manifest Ollama itself rewrote (a pull over our name) fails both.
+        """
+        p = self.root / d.extra["manifest"]
+        try:
+            m = json.loads(p.read_text())
+            model = next(l for l in m["layers"] if l["mediaType"] == reg.MT_MODEL)["digest"]
+        except (OSError, ValueError, KeyError, TypeError, StopIteration):
+            return False
+        if model not in ("sha256:" + owned.sha256, "sha256:" + d.extra["model"][0]):
+            return False
+        wrong = [(rel, t) for rel, t in d.links.items() if self._link_status(rel, t) == "wrong"]
+        return all(link_into_cache(self.root / rel, t) for rel, t in wrong)
+
+    def prepare_update(self, d: Desired, old_paths: list[str]) -> None:
+        """Drop our own alias manifests so create() rewrites them for the new model."""
+        aliases = {alias_manifest_path(a) for a in d.extra.get("aliases", [])}
+        for rel in old_paths:
+            if rel in aliases:
+                self._unlink(rel)
+
     # ---- create --------------------------------------------------------
     def _registry_cache(self, d: Desired) -> Path:
         return self.root / REGISTRY_CACHE_DIR / d.extra["repo_id"] / (d.extra["filename"] + ".json")
@@ -238,6 +263,8 @@ class OllamaView:
             self.warnings.append(f"{d.key}: not on the Hub registry; model relies on its embedded chat template")
         for rel, target in d.links.items():
             p = self.root / rel
+            if self._link_status(rel, target) == "wrong" and link_into_cache(p, target):
+                p.unlink()  # only reached for an update: a link of ours to a superseded cache path
             if not (p.is_symlink() or p.exists()):
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.symlink_to(target)

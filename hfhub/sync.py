@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from hfhub import cache, config as cfg, ollama_registry as reg, state as st
-from hfhub.views.base import Plan, View, apply, reconcile
+from hfhub.views.base import Plan, Presence, View, apply, reconcile
 from hfhub.views.lmstudio import LmStudioView
 from hfhub.views.ollama import OllamaView
 from hfhub.xfer import resolve_cache_dir
@@ -80,6 +80,14 @@ def sync_view(view: View, entries: list[cache.GgufEntry], execute: bool,
     state = st.load(view.root)
     desired = view.desired(entries)
     presence = {k: view.present(d) for k, d in desired.items()}
+    # An owned entry whose links still lead into the cache, at a file that has since
+    # been replaced (a newer download, an added mmproj), is ours to relink; anything
+    # else that does not match stays WRONG and is reported, never overwritten.
+    is_stale = getattr(view, "is_stale", None)
+    if is_stale is not None:
+        for k, pres in presence.items():
+            if pres is Presence.WRONG and k in state.owned and is_stale(desired[k], state.owned[k]):
+                presence[k] = Presence.STALE
     plan = reconcile(desired, presence, state)
     if execute:
         n = _mass_removal(plan, state)

@@ -1,13 +1,14 @@
 """View protocol plus the pure reconcile() and the single writing path apply()."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from hfhub.cache import GgufEntry
+from hfhub.cache import GgufEntry, read_link
 from hfhub.state import Owned, State
 
 
@@ -16,6 +17,22 @@ class Presence(Enum):
     PARTIAL = "partial"    # primary artefact correct, some secondary artefact missing
     CORRECT = "correct"
     WRONG = "wrong"
+    STALE = "stale"        # an owned entry still pointing at a cache file that has since changed
+
+
+def link_into_cache(link: Path, cache_target: Path) -> bool:
+    """True when `link` is a symlink into the HF hub cache `cache_target` belongs to.
+
+    `cache_target` is a repo blob, ``<hub>/models--x/blobs/<etag>``. A link into the
+    same hub, dangling or not, is a link sync (or an earlier mirror tool) made to a cache
+    file; anything else is the user's and is left alone.
+    """
+    if not link.is_symlink():
+        return False
+    hub = cache_target.parent.parent.parent
+    where = os.path.normpath(os.path.join(os.path.dirname(link), read_link(link)))
+    roots = {os.path.normpath(hub), os.path.realpath(hub)}
+    return any(where.startswith(r + os.sep) for r in roots)
 
 
 class SkipEntry(Exception):
@@ -43,7 +60,7 @@ class ForeignItem:
 
 @dataclass
 class Action:
-    kind: str            # create | adopt | tombstone | prune | foreign | skip | noop
+    kind: str            # create | update | adopt | tombstone | prune | foreign | skip | noop
     key: str
     paths: tuple[str, ...] = ()
     note: str = ""
@@ -81,7 +98,9 @@ def reconcile(desired: dict[str, Desired], presence: dict[str, Presence], state:
         pres = presence[key]
         if key in state.tombstones:
             plan.actions.append(Action("skip", key, d.paths, "tombstoned"))
-        elif pres is Presence.WRONG:
+        elif pres is Presence.STALE and owned:
+            plan.actions.append(Action("update", key, d.paths, "cache file changed; relinking"))
+        elif pres in (Presence.WRONG, Presence.STALE):
             plan.actions.append(Action("foreign", key, d.paths,
                                        "owned path replaced by something else" if owned else "exists with a different target"))
         elif pres is Presence.PARTIAL:
@@ -104,7 +123,10 @@ def apply(plan: Plan, view: View, state: State, execute: bool, desired: dict[str
     if not execute:
         return state
     desired = desired or {}
-    for a in plan.actions:
+    # Prunes first: a file renamed in the cache is a prune of the old key plus a create
+    # of the new one, and the old entry must give up its alias names before the new
+    # entry can take them over.
+    for a in sorted(plan.actions, key=lambda a: a.kind != "prune"):
         if a.kind == "create":
             d = desired.get(a.key)
             if d is None:
@@ -117,6 +139,22 @@ def apply(plan: Plan, view: View, state: State, execute: bool, desired: dict[str
             prev = state.owned.get(a.key)
             merged = set(paths) | set(prev.paths if prev else [])
             state.owned[a.key] = Owned(paths=sorted(merged), sha256=d.sha256)
+        elif a.kind == "update":
+            d = desired.get(a.key)
+            if d is None:
+                raise ValueError(f"apply: no Desired for update action {a.key!r}; pass desired=")
+            old = set(state.owned[a.key].paths) if a.key in state.owned else set()
+            prepare = getattr(view, "prepare_update", None)
+            if prepare is not None:
+                prepare(d, sorted(old))
+            try:
+                paths = view.create(d)
+            except SkipEntry as e:
+                a.kind, a.note = "skip", str(e)
+                continue
+            others = {p for k, o in state.owned.items() if k != a.key for p in o.paths}
+            view.remove([p for p in sorted(old - set(paths)) if p not in others])
+            state.owned[a.key] = Owned(paths=sorted(set(paths)), sha256=d.sha256)
         elif a.kind == "adopt":
             d = desired.get(a.key)
             if d is None:

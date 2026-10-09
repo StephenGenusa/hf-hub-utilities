@@ -105,6 +105,7 @@ hf-xfer view remove  <org/name>:<relpath> [--view ...] [--execute]
 hf-xfer view remove  --foreign <foreign key> [--view ...] [--execute]
 hf-xfer view adopt   <foreign key> --repo-id <org/name> [--move] [--execute]
 hf-xfer dupes        [--view ...]
+hf-xfer verify       [--view ...] [--hub]
 
 hf-xfer cache report
 hf-xfer cache repair            [--execute]
@@ -112,6 +113,7 @@ hf-xfer cache dedupe            [--execute]
 hf-xfer cache prune-superseded  [--execute]
 hf-xfer cache thin --min-quant IQ4_XS --max-size 23G [--repo org/name ...] [--allow-empty] [--execute]
 hf-xfer cache fetch-assets      [--repo org/name ...] [--execute]
+hf-xfer cache gc                [--execute]
 
 hf-xfer import --local-dir <path> [--repo-id ...] [--repo-type ...] [--revision ...] [--cache-dir ...]
                [--move|--hardlink] [--offline] [--no-verify] [--execute]
@@ -184,6 +186,12 @@ ollama run hf.co/unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL   # same model
 - Dry run is the default. Nothing is written without `--execute`.
 - Deleting a model inside LM Studio or with `ollama rm` sticks: sync records a
   tombstone and does not recreate it. `view add` brings it back.
+- When a cached file is replaced (a newer download of the same file, or an
+  mmproj added to the repo), sync relinks the entry: the LM Studio link, the
+  Ollama manifest, its alias manifests and blob links all move to the new file,
+  and the old blob link is dropped. This applies only to entries sync owns
+  whose links still lead into the cache; anything else in their place is
+  reported as foreign and left alone.
 - Deleting only a secondary file, an alias manifest, a projector link, an
   mmproj link, is treated as damage and repaired on the next sync. Deleting
   the primary file, the weight link in LM Studio or the `hf.co` manifest or
@@ -239,6 +247,7 @@ removed entries.
 | `cache prune-superseded` | Deletes blobs that only an older snapshot links where `refs/main` now links a different blob at the same path. Files that exist only in an old snapshot are kept. |
 | `cache thin` | Deletes quants below `--min-quant` or above `--max-size`, in repos where at least one quant survives (`--allow-empty` overrides). MTP draft files and mmproj files are never touched. |
 | `cache fetch-assets` | Downloads the image, audio and video files (the pictures and samples a README shows) that cached model repos lack, at the commit already in the cache, so nothing else is updated. For GGUF repos downloaded before `hfu` fetched assets. Dataset repos are skipped: their images are usually the data. |
+| `cache gc` | Deletes files in the shared blob store (below) that no repo links any more. |
 
 ```bash
 hf-xfer cache report
@@ -256,6 +265,32 @@ filenames and revisions, and `refs/main` says which snapshot is current.
 Every consumer resolves through the links, so a repo whose snapshot folder is
 missing looks empty even with every byte present. `cache repair` rebuilds the
 links from the Hub listing without moving a byte.
+
+A note on the shared blob store: newer `huggingface_hub` releases keep the
+bytes of a Xet-backed download once per cache, in `<hub>/blobs/<xx>/<xet hash>`,
+and make the repo's `blobs/<sha256>` a link to it. The repo blob's name is still
+the SHA-256; the store file's name is not. Every command here reads the SHA-256
+from the repo blob, and the deleting commands (`thin`, `prune-superseded`,
+`export --move`) let `huggingface_hub` collect a store file once no repo uses
+it. `cache gc` cleans up store files left behind by older versions of this tool
+or by deleting repo blobs by hand; `cache report` shows how much that is.
+
+## Checking everything: `hf-xfer verify`
+
+`verify` is read-only. It checks the filesystem itself, not sync's state file,
+so it also finds damage done outside sync:
+
+- the cache: refs without a snapshot, broken snapshot links, partial
+  downloads, shared-store files nothing uses;
+- LM Studio: broken links, links to cache files no snapshot uses, real files
+  that could be adopted;
+- Ollama: manifests pointing at missing or wrongly sized blobs, blobs no
+  manifest uses;
+- for each view, what `sync --execute` would still change.
+
+With `--hub` it also compares every cached GGUF with the file the Hub's main
+revision serves now and lists files that are outdated or were renamed there.
+The exit status is 1 when it found a problem, so it can run from cron.
 
 ---
 

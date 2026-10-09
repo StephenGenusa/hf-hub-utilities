@@ -7,7 +7,7 @@ name = "huggingfacehub"
 version = "0.3.0"
 requires-python = ">=3.13"
 dependencies = [
-    "huggingface-hub>=1.20",
+    "huggingface-hub>=2.0",
     "hf-xet",
 ]
 

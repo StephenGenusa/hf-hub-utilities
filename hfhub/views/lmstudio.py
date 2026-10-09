@@ -6,7 +6,8 @@ from pathlib import Path
 
 from hfhub.cache import GgufEntry, mmproj_for, read_link, weights
 from hfhub.state import State
-from hfhub.views.base import Desired, ForeignItem, Presence
+from hfhub.state import Owned
+from hfhub.views.base import Desired, ForeignItem, Presence, link_into_cache
 
 
 def remove_empty_parents(root: Path, path: Path) -> None:
@@ -63,12 +64,19 @@ class LmStudioView:
             return Presence.ABSENT
         return Presence.CORRECT if values == {"ok"} else Presence.PARTIAL
 
+    def is_stale(self, d: Desired, owned: Owned) -> bool:
+        """Every mismatching link is still a link into the cache: the cache file changed."""
+        wrong = [(rel, t) for rel, t in d.links.items() if self._status(rel, t) == "wrong"]
+        return bool(wrong) and all(link_into_cache(self.root / rel, t) for rel, t in wrong)
+
     def create(self, d: Desired) -> list[str]:
         for rel, target in d.links.items():
             p = self.root / rel
             if p.is_symlink() and read_link(p) == str(target):
                 continue
             p.parent.mkdir(parents=True, exist_ok=True)
+            if p.is_symlink():
+                p.unlink()  # only reached for an update: present() reports any other mismatch as WRONG
             p.symlink_to(target)
         return list(d.links)
 

@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from hfhub.blobs import delete_blob, is_shared, repo_blob
+
 # huggingface_hub is used for QUERIES and for its own metadata/path helpers so
 # we never diverge from the library's actual on-disk contract.
 try:
@@ -159,7 +161,7 @@ def _blob_refcounts(repo_root: Path) -> dict[str, int]:
     if snaps.is_dir():
         for p in snaps.rglob("*"):
             if p.is_symlink():
-                name = os.path.basename(os.path.realpath(p))
+                name = repo_blob(p).name
                 counts[name] = counts.get(name, 0) + 1
     return counts
 
@@ -399,7 +401,8 @@ def plan_export(repo_root: Path, commit: str) -> Plan:
         rel = p.relative_to(snap_dir).as_posix()
         target = Path(os.path.realpath(p))
         if target.exists():
-            etag = target.name
+            # The repo blob carries the etag; a shared-store target is named by Xet hash.
+            etag = repo_blob(p).name if p.is_symlink() else target.name
             can.append((rel, etag, etag_kind(etag), "copy blob -> local-dir"))
         else:
             cannot.append((rel, "blob missing (broken snapshot symlink)"))
@@ -418,11 +421,20 @@ def execute_export(repo_root: Path, commit: str, local_dir: Path, plan: Plan,
         dst.parent.mkdir(parents=True, exist_ok=True)
         if dst.exists():
             dst.unlink()
+        blob = repo_blob(link)
         effective = mode
-        if mode == "move" and refcounts.get(src.name, 0) > 1:
+        drop_shared = False
+        if mode == "move" and refcounts.get(blob.name, 0) > 1:
             effective = "copy"
-            notes.append(f"{rel}: blob shared by {refcounts[src.name]} snapshots — copied, not moved")
+            notes.append(f"{rel}: blob shared by {refcounts[blob.name]} snapshots — copied, not moved")
+        elif mode == "move" and is_shared(blob):
+            # Never rename a shared-store file: other repos may link it. Copy it out,
+            # then drop this repo's link and let huggingface_hub collect the store file.
+            effective, drop_shared = "copy", True
         _place_file(src, dst, effective)
+        if drop_shared:
+            link.unlink()
+            delete_blob(blob)
         # Regenerate metadata so a later `hf download --local-dir` is incremental.
         write_download_metadata(local_dir, rel, commit_hash=commit, etag=etag)
         if effective == "move":

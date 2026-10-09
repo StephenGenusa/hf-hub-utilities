@@ -1,4 +1,4 @@
-"""Maintenance operations on the HF hub cache itself: report, repair, dedupe, prune, thin.
+"""Maintenance operations on the HF hub cache itself: report, repair, dedupe, prune, thin, gc.
 
 Every operation takes ``execute`` and writes nothing unless it is True. They act
 only on the cache; after a deleting operation, run ``hf-xfer sync --execute`` so
@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from hfhub import cache
+from hfhub import blobs as hfblobs, cache
 
 Out = Callable[[str], None]
 GB = 1e9
@@ -175,6 +175,9 @@ def report(hub: Path, out: Out = print) -> None:
     out(f"identical blobs across repos (dedupe):   {xrepo_bytes / GB:.1f} GB")
     out(f"unlinked blobs (repair):                 {unlinked / GB:.1f} GB")
     out(f"partial downloads (*.incomplete):        {partial / GB:.1f} GB")
+    leaked = sum(hfblobs.unreferenced_store_blobs(hub).values())
+    if leaked:
+        out(f"unreferenced shared-store blobs (gc):    {leaked / GB:.1f} GB")
     out("repos with 4+ quants of one model (thin):")
     for sz, n, r in sorted(multi, reverse=True):
         out(f"  {sz / GB:7.1f} GB  {n:2d} quants  {r}")
@@ -233,12 +236,33 @@ def repair(hub: Path, execute: bool, out: Out = print,
 
 # ---------------------------------------------------------------- dedupe
 def dedupe(hub: Path, execute: bool, out: Out = print) -> Result:
-    """Hardlink identical blobs across repos; turn plain-file copies in snapshots into links."""
+    """Hardlink identical blobs across repos; turn plain-file copies in snapshots into links.
+
+    When one copy already lives in the shared blob store (huggingface_hub 2.x), the
+    plain copies are linked into the store the way huggingface_hub links a new
+    download, so the store's reference list stays complete.
+    """
     res = Result()
     owners: dict[str, list[Path]] = defaultdict(list)
+    shared: dict[str, Path] = {}
     for repo in hub.glob("models--*"):
         for b in _blobs(repo):
-            owners[b.name].append(b)
+            if hfblobs.is_shared(b):
+                if b.exists():
+                    shared.setdefault(b.name, Path(os.path.realpath(b)))
+            else:
+                owners[b.name].append(b)
+    for sha, store in shared.items():
+        size = store.stat().st_size
+        for dup in owners.pop(sha, []):
+            if dup.stat().st_size != size or dup.stat().st_dev != store.stat().st_dev:
+                continue
+            res.actions += 1
+            res.bytes += size
+            out(f"  {'linked' if execute else 'would link'} into the shared store: "
+                f"{_repo_id(dup.parent.parent)}:{sha[:12]}")
+            if execute:
+                hfblobs.link_into_store(dup, store)
     for sha, paths in owners.items():
         paths.sort(key=lambda p: (-p.stat().st_nlink, str(p)))
         canon = paths[0]
@@ -303,14 +327,14 @@ def prune_superseded(hub: Path, execute: bool, out: Out = print) -> Result:
             blob = repo / "blobs" / b
             sz = blob.stat().st_size if blob.exists() else 0
             res.actions += 1
-            res.bytes += sz
             rel = links[0].relative_to(snaps / links[0].relative_to(snaps).parts[0]).as_posix()
             out(f"  {'deleted' if execute else 'would delete'} {sz / GB:5.1f} GB  {_repo_id(repo)}:{rel}")
             if execute:
                 for l in links:
                     l.unlink()
-                if blob.exists():
-                    blob.unlink()
+                res.bytes += hfblobs.delete_blob(blob)
+            else:
+                res.bytes += sz
         if execute:
             for d in snaps.iterdir():
                 if d.name != ref:
@@ -411,16 +435,32 @@ def thin(hub: Path, execute: bool, min_bits: int | None = None, max_size: int | 
             continue
         for e in sorted(victims, key=lambda e: -e.size):
             res.actions += 1
-            res.bytes += e.size
             out(f"  {'deleted' if execute else 'would delete'} {e.size / GB:5.1f} GB  {e.key}")
             if execute:
                 repo = hub / cache.repo_folder(rid)
                 for _, l, b in list(_links(repo)):
                     if b == e.sha256:
                         l.unlink()
-                if e.blob.exists():
-                    e.blob.unlink()
+                res.bytes += hfblobs.delete_blob(e.blob)
+            else:
+                res.bytes += e.size
     out(res.summary("thin", execute))
     if execute and res.actions:
         out("run `hf-xfer sync --execute` to prune the views")
+    return res
+
+
+# ---------------------------------------------------------------- gc
+def gc(hub: Path, execute: bool, out: Out = print) -> Result:
+    """Collect shared-store files (huggingface_hub >= 2.x layout) that no repo blob links to.
+
+    A store file is only listed when its reference manifest is readable and empty, so
+    content huggingface_hub cannot account for is never touched.
+    """
+    res = Result()
+    for store, size in sorted(hfblobs.unreferenced_store_blobs(hub).items()):
+        res.actions += 1
+        out(f"  {'deleted' if execute else 'would delete'} {size / GB:5.1f} GB  {store.relative_to(hub)}")
+        res.bytes += hfblobs._hf_shared.sweep_shared_blob(store, cache_dir=hub) if execute else size
+    out(res.summary("gc", execute))
     return res

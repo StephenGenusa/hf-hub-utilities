@@ -5,18 +5,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from hfhub.blobs import read_link, repo_blob  # read_link re-exported for the views
 from hfhub.hfu import _SHARD_SUFFIX, is_mmproj, pick_mmproj
 
 _HEX = set("0123456789abcdef")
-
-
-def read_link(p: Path) -> str:
-    r"""os.readlink without the \\?\ prefix Windows adds to absolute targets,
-    so the result compares equal to the str(Path) the link was made from."""
-    t = os.readlink(p)
-    if t.startswith("\\\\?\\UNC\\"):
-        return "\\\\" + t[8:]
-    return t[4:] if t.startswith("\\\\?\\") else t
 
 
 @dataclass(frozen=True)
@@ -76,7 +68,9 @@ def scan(hub: Path) -> list[GgufEntry]:
                 rel = link.relative_to(snap).as_posix()
                 if rel in seen or not link.is_symlink():
                     continue
-                blob = Path(os.path.realpath(link))
+                # The repo blob, not its final target: in the shared-store layout the
+                # target is named by Xet hash and only the repo blob carries the sha256.
+                blob = repo_blob(link)
                 if not _is_sha(blob.name) or not blob.is_file():
                     continue
                 seen.add(rel)
@@ -98,9 +92,9 @@ def unlinked(hub: Path) -> list[tuple[str, Path]]:
         for snap, _ in _snapshots_in_order(repo_root):
             for link in snap.rglob("*"):
                 if link.is_symlink():
-                    linked.add(os.path.realpath(link))
+                    linked.add(str(repo_blob(link)))
         for b in sorted(blobs.iterdir()):
-            if _is_sha(b.name) and str(b.resolve()) not in linked:
+            if _is_sha(b.name) and str(Path(os.path.realpath(b.parent)) / b.name) not in linked:
                 out.append((repo_id_from_folder(repo_root.name), b))
     return out
 

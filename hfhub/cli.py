@@ -57,7 +57,12 @@ def _parser() -> argparse.ArgumentParser:
     d = sub.add_parser("dupes", help="list foreign files that look like cache entries")
     view_opt(d)
 
-    c = sub.add_parser("cache", help="maintain the HF cache itself (report/repair/dedupe/prune-superseded/thin/fetch-assets)")
+    vf = sub.add_parser("verify", help="check the cache and every view link against each other (read-only)")
+    view_opt(vf)
+    vf.add_argument("--hub", action="store_true",
+                    help="also compare every linked GGUF with the Hub's current file (one API call per repo)")
+
+    c = sub.add_parser("cache", help="maintain the HF cache itself (report/repair/dedupe/prune-superseded/thin/fetch-assets/gc)")
     cs = c.add_subparsers(dest="ccmd", required=True)
     cs.add_parser("report", help="how much each maintenance command could reclaim")
     p = cs.add_parser("repair", help="recreate snapshot links for blobs that nothing references"); execute_opt(p, "create links")
@@ -72,6 +77,8 @@ def _parser() -> argparse.ArgumentParser:
     p = cs.add_parser("fetch-assets", help="download README images, audio and video that cached model repos lack")
     p.add_argument("--repo", action="append", metavar="ORG/NAME", help="limit to a repo (repeatable)")
     execute_opt(p, "download")
+    p = cs.add_parser("gc", help="delete shared-store files (huggingface_hub 2.x layout) that no repo uses")
+    execute_opt(p, "delete")
 
     # Intercepted in xfer_main before argparse ever sees them; they are here so
     # that `hf-xfer --help` lists every command the tool actually has.
@@ -104,6 +111,8 @@ def _cache_cmd(args) -> int:
                        repos=args.repo, allow_empty=args.allow_empty, out=print)
     elif args.ccmd == "fetch-assets":
         cache_ops.fetch_assets(hub, execute=args.execute, repos=args.repo, out=print)
+    elif args.ccmd == "gc":
+        cache_ops.gc(hub, execute=args.execute, out=print)
     return 0
 
 
@@ -140,4 +149,7 @@ def xfer_main(argv: list[str] | None = None) -> int:
         from hfhub import dupes
         dupes.run(config, views)
         return 0
+    if args.cmd == "verify":
+        from hfhub import verify
+        return 1 if verify.run(config, views, hub=args.hub, out=print) else 0
     return 2

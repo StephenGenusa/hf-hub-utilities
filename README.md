@@ -46,7 +46,8 @@ uv pip install -e .
 ```
 
 This installs `hfu` and `hf-xfer`, plus the `hf` CLI that `hfu` runs, which
-comes with the `huggingface-hub` dependency.
+comes with the `huggingface-hub` dependency (2.0 or later, which added the
+shared blob store described under [Cache maintenance](#cache-maintenance)).
 
 The tools run on Linux, macOS and Windows. The cache and both views are built
 from symlinks, so on Windows turn on Developer Mode (or run as administrator)
@@ -192,6 +193,10 @@ ollama run hf.co/unsloth/Qwen3.6-27B-GGUF:UD-Q4_K_XL   # same model
   and the old blob link is dropped. This applies only to entries sync owns
   whose links still lead into the cache; anything else in their place is
   reported as foreign and left alone.
+- Sync only ever deletes inside the view root. A state file listing a path
+  that is absolute or climbs out with `..` is refused and that view is
+  skipped; a path that leads outside through a symlinked folder is left in
+  place with a warning.
 - Deleting only a secondary file, an alias manifest, a projector link, an
   mmproj link, is treated as damage and repaired on the next sync. Deleting
   the primary file, the weight link in LM Studio or the `hf.co` manifest or
@@ -241,9 +246,9 @@ removed entries.
 
 | Command | What it does |
 |---------|--------------|
-| `cache report` | How much `prune-superseded`, `dedupe` and `repair` would act on, the size of partial downloads (`*.incomplete`), and the repos holding 4+ quants of one model (candidates for `thin`) |
+| `cache report` | How much `prune-superseded`, `dedupe` and `repair` would act on, the size of partial downloads (`*.incomplete`), shared-store files no repo uses (for `gc`), and the repos holding 4+ quants of one model (candidates for `thin`) |
 | `cache repair` | Recreates snapshot links for blobs nothing references, matching SHA-256 and size against the repo's current Hub revision. Blobs the Hub no longer lists are left alone. |
-| `cache dedupe` | Hardlinks identical blobs stored under several repos; turns plain-file copies inside snapshot folders into links (moving the bytes into `blobs/` if needed). No data is lost. |
+| `cache dedupe` | Hardlinks identical blobs stored under several repos; turns plain-file copies inside snapshot folders into links (moving the bytes into `blobs/` if needed). When one copy is already in the shared blob store, the others are linked into the store instead. No data is lost. |
 | `cache prune-superseded` | Deletes blobs that only an older snapshot links where `refs/main` now links a different blob at the same path. Files that exist only in an old snapshot are kept. |
 | `cache thin` | Deletes quants below `--min-quant` or above `--max-size`, in repos where at least one quant survives (`--allow-empty` overrides). MTP draft files and mmproj files are never touched. |
 | `cache fetch-assets` | Downloads the image, audio and video files (the pictures and samples a README shows) that cached model repos lack, at the commit already in the cache, so nothing else is updated. For GGUF repos downloaded before `hfu` fetched assets. Dataset repos are skipped: their images are usually the data. |
@@ -256,8 +261,14 @@ hf-xfer cache dedupe --execute
 hf-xfer cache prune-superseded --execute
 hf-xfer cache thin --min-quant IQ4_XS --max-size 23G --execute
 hf-xfer cache fetch-assets --execute
+hf-xfer cache gc --execute
 hf-xfer sync --execute
 ```
+
+A dry run reports the space the same command with `--execute` would free. A
+blob hardlinked into several repos (after `dedupe`) counts only when every
+link to it is deleted, and a shared-store file only when every repo using it
+loses it; deleting one of several copies frees nothing.
 
 A note on snapshot folders: the `blobs/` directory holds content under
 SHA-256 names only; `snapshots/<commit>/<path>` links give those blobs their
@@ -274,6 +285,8 @@ from the repo blob, and the deleting commands (`thin`, `prune-superseded`,
 `export --move`) let `huggingface_hub` collect a store file once no repo uses
 it. `cache gc` cleans up store files left behind by older versions of this tool
 or by deleting repo blobs by hand; `cache report` shows how much that is.
+
+---
 
 ## Checking everything: `hf-xfer verify`
 
@@ -336,7 +349,9 @@ copy across devices).
 
 **`export`** materialises a flat copy of a cached repo with metadata so later
 `hf download --local-dir` calls are incremental. With `--move`, blobs shared by
-several revisions are copied rather than moved.
+several revisions are copied rather than moved, and a file in the shared blob
+store is copied out and the repo's link dropped, so the store file is deleted
+only once no other repo uses it.
 
 ```bash
 hf-xfer import --local-dir ~/models/google/gemma-3-4b-it              # dry run
@@ -373,25 +388,31 @@ Pass `--repo-type dataset` on both sides for a dataset.
 ## Development
 
 ```bash
-uv pip install -e . pytest
-python -m pytest -q                                   # unit tests, no network
-HFHUB_LIVE=1 python -m pytest -q -k live              # hits huggingface.co
-HFHUB_OLLAMA=1 python -m pytest tests/test_ollama_integration.py -q   # starts a scratch ollama serve
+uv sync                                                   # locked versions from uv.lock, plus pytest
+uv run python -m pytest -q                                # unit tests, no network
+HFHUB_LIVE=1 uv run python -m pytest -q -k live           # hits huggingface.co
+HFHUB_OLLAMA=1 uv run python -m pytest tests/test_ollama_integration.py -q   # starts a scratch ollama serve
 ```
+
+`uv.lock` pins the dependency versions the suite was run against; after
+changing a dependency in `pyproject.toml`, run `uv lock` and commit both.
 
 The suite passes on Linux and Windows. Code that builds a path inside a repo or
 a view uses `/` on every platform (`Path.as_posix()`), because Hub filenames,
 view keys, aliases and registry tags all use `/`. Read links with
-`cache.read_link`, not `os.readlink`, which on Windows adds a `\\?\` prefix.
+`blobs.read_link` (also importable as `cache.read_link`), not `os.readlink`,
+which on Windows adds a `\\?\` prefix to absolute targets.
 
 Layout, all under `hfhub/`: `cli.py` is the `hf-xfer` command line;
-`cache.py` scans the cache; `config.py` reads and edits the config file;
+`cache.py` scans the cache; `blobs.py` handles repo blobs in both cache layouts
+(regular files and links into the shared store); `config.py` reads and edits the config file;
 `state.py` keeps each view's ownership and tombstone record
 (`<view root>/.hfhub-state.json`); `views/base.py` holds the pure reconcile
 table and the single write path; `views/lmstudio.py` and `views/ollama.py` are
 the two views; `ollama_registry.py` talks to the registry endpoint;
 `gguf_header.py` reads GGUF metadata; `sync.py` drives the views; `adopt.py`,
-`dupes.py`, and `cache_ops.py` are the maintenance commands; `xfer.py`
+`dupes.py`, and `cache_ops.py` are the maintenance commands; `verify.py` is
+the read-only `verify` check; `xfer.py`
 (import/export) and `hfu.py` are the original tools. `hfu.py` and `hf_xfer.py`
 at the repo root are shims for running from a checkout without installing.
 

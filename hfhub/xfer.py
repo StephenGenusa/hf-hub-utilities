@@ -27,6 +27,7 @@ Verified against huggingface_hub 1.20.1 source:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import sys
@@ -90,6 +91,19 @@ def etag_kind(etag: str) -> str:
     if len(e) == 40 and all(c in "0123456789abcdef" for c in e):
         return "git-sha1"
     return "unknown"
+
+
+def content_etag(path: Path, kind: str) -> str:
+    """The etag `path`'s bytes would have: sha256 for an LFS file, the git blob
+    sha1 (sha1 over "blob <size>\\0" + bytes) for a regular one."""
+    if kind == "git-sha1":
+        h = hashlib.sha1(f"blob {path.stat().st_size}\0".encode())
+    else:
+        h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 24), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _looks_like_commit(rev: str) -> bool:
@@ -183,6 +197,9 @@ class RepoMap:
     etags: dict[str, str]          # relpath -> etag
     source: str                    # "hub" | "local-metadata" | "mixed"
     multi_commit: bool = False     # True if local metadata disagreed on commit
+    files: Optional[set] = None    # only these relpaths (None: every file in the local dir)
+    ref: Optional[str] = None      # refs/<ref> to point at commit_hash after the import
+    ref_if_absent: bool = False    # write it only when the repo has no such ref yet
 
 
 def map_from_hub(repo_id: str, repo_type: str, revision: str) -> RepoMap:
@@ -245,20 +262,102 @@ def map_from_local_metadata(local_dir: Path) -> RepoMap:
     )
 
 
+def _present_files(local_dir: Path) -> set[str]:
+    """Files in the local dir, as posix relpaths, excluding the .cache metadata area."""
+    out = set()
+    for p in local_dir.rglob("*"):
+        if p.is_file():
+            rel = p.relative_to(local_dir).as_posix()
+            if not rel.startswith(".cache/"):
+                out.add(rel)
+    return out
+
+
+def maps_from_local_metadata(local_dir: Path) -> list[RepoMap]:
+    """One RepoMap per commit the local download metadata records, covering the
+    files downloaded at that commit."""
+    dl_root = local_dir / ".cache" / "huggingface" / "download"
+    by_commit: dict[str, dict[str, str]] = {}
+    for meta in dl_root.rglob("*.metadata") if dl_root.is_dir() else []:
+        relpath = str(meta.relative_to(dl_root))[: -len(".metadata")].replace(os.sep, "/")
+        parsed = _read_metadata_file(meta)
+        if parsed is None or not (local_dir / relpath).is_file():
+            continue
+        commit, etag = parsed
+        by_commit.setdefault(commit, {})[relpath] = etag
+    return [RepoMap(commit_hash=c, etags=e, source="local-metadata", files=set(e))
+            for c, e in sorted(by_commit.items())]
+
+
+def hub_ref_names(repo_id: str, repo_type: str) -> dict[str, list[str]]:
+    """commit -> branch/tag names whose tip it is (main first); {} when the Hub
+    cannot be asked."""
+    try:
+        refs = HfApi().list_repo_refs(repo_id, repo_type=repo_type)
+    except Exception as e:
+        sys.stderr.write(f"Could not list the repo's branches ({type(e).__name__}); "
+                         f"refs are only written where the cache has none.\n")
+        return {}
+    out: dict[str, list[str]] = {}
+    for r in sorted(list(refs.branches) + list(refs.tags), key=lambda r: r.name != "main"):
+        out.setdefault(r.target_commit, []).append(r.name)
+    return out
+
+
+def build_repo_maps(local_dir: Path, repo_id: str, repo_type: str, revision: Optional[str],
+                    offline: bool) -> list[RepoMap]:
+    """What to import, as one RepoMap per commit.
+
+    Without --revision, a local dir that `hf download --local-dir` wrote is imported
+    as what it is: each file under the commit its download metadata records, so a
+    copy made before the repo moved on still imports whole. The Hub is asked only
+    which branch or tag each commit is the tip of (for the ref), and for files the
+    metadata does not cover. An explicit --revision, or a dir without metadata, is
+    imported against the Hub's listing at that revision. Contents are verified
+    against the etags either way, when the files are placed.
+    """
+    if revision is None:
+        metas = maps_from_local_metadata(local_dir)
+        if metas:
+            tips = {} if offline else hub_ref_names(repo_id, repo_type)
+            for m in metas:
+                names = tips.get(m.commit_hash, [])
+                # A commit no ref points at any more is an older main: set main only
+                # if the cache has none, never moving an existing one backwards.
+                m.ref, m.ref_if_absent = (names[0], False) if names else ("main", True)
+            rest = _present_files(local_dir) - set().union(*(m.etags for m in metas))
+            if rest:
+                extra = (RepoMap(commit_hash=None, etags={}, source="no metadata (offline)")
+                         if offline else build_repo_map(local_dir, repo_id, repo_type, "main", False))
+                extra.files, extra.ref = rest, "main"
+                metas.append(extra)
+            return metas
+        revision = "main"
+    m = build_repo_map(local_dir, repo_id, repo_type, revision, offline)
+    m.ref, m.ref_if_absent = revision, offline
+    return [m]
+
+
 def build_repo_map(local_dir: Path, repo_id: str, repo_type: str, revision: str,
                    offline: bool) -> RepoMap:
-    """Prefer the Hub (covers every file authoritatively); fall back to local
-    metadata when offline or the query fails."""
-    if not offline:
-        try:
-            hub = map_from_hub(repo_id, repo_type, revision)
-            if hub.commit_hash:
-                return hub
-        except (RepositoryNotFoundError, RevisionNotFoundError) as e:
-            sys.stderr.write(f"Hub query failed ({type(e).__name__}); using local metadata.\n")
-        except Exception as e:
-            sys.stderr.write(f"Hub query failed ({e}); using local metadata.\n")
-    return map_from_local_metadata(local_dir)
+    """The Hub's listing (authoritative for every file), or with `offline` the
+    local download metadata.
+
+    A failed Hub query is reported, never papered over with local metadata: a
+    transient error would otherwise switch the source of truth without notice,
+    and the metadata's etags are not always content hashes (huggingface_hub 2.x
+    records the Xet hash for Xet-backed files)."""
+    if offline:
+        return map_from_local_metadata(local_dir)
+    try:
+        hub = map_from_hub(repo_id, repo_type, revision)
+        if hub.commit_hash:
+            return hub
+        sys.stderr.write("Hub query returned no commit.\n")
+    except Exception as e:
+        sys.stderr.write(f"Hub query failed ({type(e).__name__}: {e}).\n")
+    sys.stderr.write("Nothing imported; retry, or pass --offline to use the local download metadata.\n")
+    return RepoMap(commit_hash=None, etags={}, source="hub (lookup failed)")
 
 
 # --------------------------------------------------------------------------- #
@@ -312,18 +411,14 @@ def plan_import(local_dir: Path, cache_dir: Path, repo_id: str, repo_type: str,
     commit = rmap.commit_hash
     can, cannot = [], []
 
-    # Files physically present in the local dir, excluding the .cache metadata area.
-    present: set[str] = set()
-    for p in local_dir.rglob("*"):
-        if p.is_file():
-            rel = p.relative_to(local_dir).as_posix()
-            if rel.startswith(".cache/"):
-                continue
-            present.add(rel)
+    # Files physically present in the local dir (this map's share of them).
+    present = _present_files(local_dir)
+    if rmap.files is not None:
+        present &= rmap.files
 
     if commit is None:
         for rel in sorted(present):
-            cannot.append((rel, "no commit hash (Hub unreachable and no local metadata)"))
+            cannot.append((rel, "no commit hash (Hub lookup failed, or no local metadata with --offline)"))
         return Plan(can, cannot), repo_root, commit
 
     for rel in sorted(present):
@@ -351,16 +446,34 @@ def plan_import(local_dir: Path, cache_dir: Path, repo_id: str, repo_type: str,
     return Plan(can, cannot), repo_root, commit
 
 
-def execute_import(local_dir: Path, repo_root: Path, commit: str, revision: str,
-                   plan: Plan, mode: str) -> list[str]:
+def execute_import(local_dir: Path, repo_root: Path, commit: str, revision: Optional[str],
+                   plan: Plan, mode: str, source: str = "hub",
+                   ref_if_absent: bool = False) -> tuple[list[str], list[str]]:
+    """Place every planned file whose bytes match its etag.
+
+    Each file is hashed first. A mismatch against the Hub's listing means the
+    local copy is from another revision (or damaged): it is skipped and reported,
+    never filed under a name its content does not have. With local metadata
+    (`--offline`) a 64-hex etag that is not the file's sha256 is a Xet hash, and
+    an LFS file's etag is its sha256 by definition, so the sha256 is used.
+    Returns (directories removed by a move, problems)."""
     (repo_root / "blobs").mkdir(parents=True, exist_ok=True)
     (repo_root / "snapshots" / commit).mkdir(parents=True, exist_ok=True)
     (repo_root / "refs").mkdir(parents=True, exist_ok=True)
 
-    for rel, etag, _kind, action in plan.can:
+    problems: list[str] = []
+    for rel, etag, kind, action in plan.can:
         if action.startswith("already"):
             continue
         src = local_dir / rel
+        actual = content_etag(src, kind)
+        if actual != etag:
+            if source == "local-metadata" and kind == "sha256(LFS)":
+                etag = actual
+            else:
+                problems.append(f"{rel}: content does not match {commit[:12]} "
+                                f"(expected {etag[:12]}, file has {actual[:12]}); not imported")
+                continue
         blob = repo_root / "blobs" / etag
         _place_file(src, blob, mode)
         snap = repo_root / "snapshots" / commit / rel
@@ -369,14 +482,17 @@ def execute_import(local_dir: Path, repo_root: Path, commit: str, revision: str,
             snap.unlink()
         snap.symlink_to(_rel_symlink_target(blob, snap))
 
-    # refs/<revision> -> commit. Skip writing a ref named like a bare commit.
-    if not _looks_like_commit(revision):
-        (repo_root / "refs" / revision).parent.mkdir(parents=True, exist_ok=True)
-        (repo_root / "refs" / revision).write_text(commit)
+    # refs/<revision> -> commit. Skip writing a ref named like a bare commit, and
+    # any ref at all when something was refused: the snapshot is incomplete.
+    ref = repo_root / "refs" / revision if revision else None
+    if ref is not None and not _looks_like_commit(revision) and not problems \
+            and not (ref_if_absent and ref.is_file()):
+        ref.parent.mkdir(parents=True, exist_ok=True)
+        ref.write_text(commit)
 
     if mode == "move":
-        return prune_empty_dirs(local_dir, remove_root=True)
-    return []
+        return prune_empty_dirs(local_dir, remove_root=True), problems
+    return [], problems
 
 
 # --------------------------------------------------------------------------- #
@@ -504,8 +620,9 @@ def main(argv=None) -> int:
                             "path components of --local-dir.")
         p.add_argument("--repo-type", default="model",
                        choices=["model", "dataset", "space"])
-        p.add_argument("--revision", default="main",
-                       help="branch/tag name, or a commit hash")
+        p.add_argument("--revision", default=None,
+                       help="branch/tag name, or a commit hash. import: default is the commit "
+                            "each file's download metadata records (else main); export: main")
         p.add_argument("--cache-dir", default=None,
                        help="override cache dir (else HF_HUB_CACHE/HF_HOME resolution)")
         p.add_argument("--execute", action="store_true",
@@ -540,43 +657,61 @@ def main(argv=None) -> int:
         if not local_dir.is_dir():
             sys.stderr.write(f"local-dir not found: {local_dir}\n")
             return 2
-        rmap = build_repo_map(local_dir, args.repo_id, args.repo_type,
-                              args.revision, args.offline)
-        plan, repo_root, commit = plan_import(
-            local_dir, cache_dir, args.repo_id, args.repo_type, rmap)
-        extra = ""
-        if rmap.multi_commit:
-            extra = ("WARNING: local metadata referenced multiple commits; "
-                     f"using the most common ({commit}).")
-        already = repo_root.exists()
-        if already:
-            extra = (extra + "\n" if extra else "") + \
-                f"NOTE: repo folder already exists in cache; present files are skipped."
-        print_report("IMPORT  local-dir -> cache", cache_dir, how, repo_root,
-                     commit, f"{rmap.source}", plan, args.execute, mode, extra)
-        if args.execute and commit and plan.can:
-            removed = execute_import(local_dir, repo_root, commit, args.revision, plan, mode)
-            print("Import applied.")
+        maps = build_repo_maps(local_dir, args.repo_id, args.repo_type,
+                               args.revision, args.offline)
+        failed = False
+        for rmap in maps:
+            plan, repo_root, commit = plan_import(
+                local_dir, cache_dir, args.repo_id, args.repo_type, rmap)
+            notes = []
+            if rmap.multi_commit:
+                notes.append("WARNING: local metadata referenced multiple commits; "
+                             f"using the most common ({commit}).")
+            if len(maps) > 1:
+                notes.append(f"NOTE: {len(rmap.files or ())} of the local files belong to this commit.")
+            if rmap.ref:
+                notes.append(f"ref         : refs/{rmap.ref}"
+                             + (" (only if the cache has none)" if rmap.ref_if_absent else ""))
+            if repo_root.exists():
+                notes.append("NOTE: repo folder already exists in cache; present files are skipped.")
+            print_report("IMPORT  local-dir -> cache", cache_dir, how, repo_root,
+                         commit, rmap.source, plan, args.execute, mode, "\n".join(notes))
+            if not (args.execute and commit and plan.can):
+                continue
+            removed, problems = execute_import(local_dir, repo_root, commit, rmap.ref, plan,
+                                               mode, rmap.source, rmap.ref_if_absent)
+            if problems:
+                failed = True
+                print(f"REFUSED ({len(problems)}), left where they are:")
+                for p in problems:
+                    print(f"  {p}")
+            print("Import applied." if not problems else "Import applied to the files that verified.")
             if removed:
                 print(f"Erased {len(removed)} empty director"
                       f"{'y' if len(removed) == 1 else 'ies'} under {local_dir}.")
-            if not args.no_verify:
-                if args.offline:
-                    ok, broken = wiring_check(repo_root, commit)
-                    print(f"Wiring check (offline): {ok} file(s) resolve to blobs.")
-                    if broken:
-                        print(f"  BROKEN ({len(broken)}): " + ", ".join(broken))
-                    print("  Note: offline check confirms wiring only; it cannot detect "
-                          "files missing from the snapshot. Re-run online (drop --offline) "
-                          "for a true completeness check + fetch.")
+            if problems or args.no_verify:
+                continue
+            if args.offline:
+                ok, broken = wiring_check(repo_root, commit)
+                print(f"Wiring check (offline): {ok} file(s) resolve to blobs.")
+                if broken:
+                    print(f"  BROKEN ({len(broken)}): " + ", ".join(broken))
+                print("  Note: offline check confirms wiring only; it cannot detect "
+                      "files missing from the snapshot. Re-run online (drop --offline) "
+                      "for a true completeness check + fetch.")
+            elif rmap.ref and not rmap.ref_if_absent:
+                print(f"Verifying cache completeness at {rmap.ref} (hf download)…")
+                ok, path, err = verify_after_import(
+                    args.repo_id, args.repo_type, rmap.ref, cache_dir)
+                if ok:
+                    print(f"  OK — all repo files present in cache:\n  {path}")
                 else:
-                    print("Verifying cache completeness (hf download)…")
-                    ok, path, err = verify_after_import(
-                        args.repo_id, args.repo_type, args.revision, cache_dir)
-                    if ok:
-                        print(f"  OK — all repo files present in cache:\n  {path}")
-                    else:
-                        print(f"  VERIFY FAILED ({type(err).__name__}): {err}")
+                    print(f"  VERIFY FAILED ({type(err).__name__}): {err}")
+            else:
+                print("Completeness check skipped: this commit is no longer the tip of "
+                      "any branch, so `hf download` would fetch a newer revision.")
+        if failed:
+            return 1
         return 0
 
     # export
@@ -584,6 +719,7 @@ def main(argv=None) -> int:
     if not repo_root.is_dir():
         sys.stderr.write(f"repo not found in cache: {repo_root}\n")
         return 2
+    args.revision = args.revision or "main"
     commit = resolve_commit_in_cache(repo_root, args.revision)
     if commit is None:
         sys.stderr.write(

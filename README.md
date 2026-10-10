@@ -391,10 +391,24 @@ between them.
 
 **`import`** seeds the cache from a flat copy, for models that arrived by
 USB drive, rsync, or another tool, so `hf download` treats them as cached.
-The Hub supplies the commit and per-file etags; `--offline` uses the
-`.metadata` files a previous `hf download --local-dir` wrote. Transfer modes:
-copy (default), `--move`, `--hardlink` (same filesystem only; falls back to a
-copy across devices).
+A folder `hf download --local-dir` wrote is imported as what it is: each file
+goes into the snapshot of the commit its `.cache/huggingface/download`
+metadata records, so a copy made before the repo moved on imports whole. The
+Hub is asked only which branch or tag that commit is the tip of (that name
+becomes the ref; a commit that is no longer a tip sets `refs/main` only when
+the cache has none, never moving it backwards), and for files without
+metadata. A folder without metadata, or an explicit `--revision`, is imported
+against the Hub's listing at that revision; `--offline` never asks the Hub.
+
+Every file is hashed before it is placed and must match its etag: the SHA-256
+for an LFS file, the git blob hash for a small one. A file that does not match
+(another revision's copy, or a damaged one) is refused and left where it is,
+never filed under a name its content does not have. Download metadata from
+`huggingface_hub` 2.x records the Xet hash for Xet-backed files; those are
+filed under their real SHA-256. A failed Hub lookup stops the import rather
+than switching silently to other data. Transfer modes: copy (default),
+`--move`, `--hardlink` (same filesystem only; falls back to a copy across
+devices).
 
 **`export`** materialises a flat copy of a cached repo with metadata so later
 `hf download --local-dir` calls are incremental. With `--move`, blobs shared by
@@ -410,8 +424,10 @@ hf-xfer export --local-dir ~/export/gemma --repo-id google/gemma-3-4b-it --execu
 
 `--repo-id` defaults to the last two path components of `--local-dir`.
 `--repo-type` is `model`, `dataset` or `space` (default `model`); `--revision`
-is a branch, tag or commit (default `main`). After an import, `hf download`
-checks the repo is complete unless `--no-verify` is given. The
+is a branch, tag or commit (import: default as described above; export:
+`main`). After an import at a branch tip, `hf download` checks the repo is
+complete and fetches what is missing, unless `--no-verify` is given; pass it
+when the folder holds only some of the repo's files on purpose (one quant). The
 cache directory resolves as `--cache-dir` > `HF_HUB_CACHE` >
 `HUGGINGFACE_HUB_CACHE` > `HF_HOME/hub` > `~/.cache/huggingface/hub`.
 

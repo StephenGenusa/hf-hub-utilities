@@ -111,6 +111,12 @@ def _looks_like_commit(rev: str) -> bool:
     return len(r) == 40 and all(c in "0123456789abcdef" for c in r)
 
 
+def _safe_ref(name: str) -> bool:
+    """A ref name that stays inside refs/: relative, no empty, `.` or `..` parts."""
+    parts = name.replace("\\", "/").split("/")
+    return bool(name) and not name.startswith("/") and all(p not in ("", ".", "..") for p in parts)
+
+
 def _place_file(src: Path, dst: Path, mode: str) -> str:
     """Put src's content at dst. mode: 'copy' | 'move' | 'hardlink'.
     copy/move preserve the original mtime+atime (copy2 / rename). hardlinks
@@ -232,8 +238,8 @@ def _read_metadata_file(meta_path: Path) -> Optional[tuple[str, str]]:
             etag = f.readline().strip()
     except OSError:
         return None
-    if not commit or not etag:
-        return None
+    if not commit or not etag or not _looks_like_commit(commit):
+        return None   # the commit names a snapshot folder: anything but a hash is rejected
     return commit, etag
 
 
@@ -420,6 +426,10 @@ def plan_import(local_dir: Path, cache_dir: Path, repo_id: str, repo_type: str,
         for rel in sorted(present):
             cannot.append((rel, "no commit hash (Hub lookup failed, or no local metadata with --offline)"))
         return Plan(can, cannot), repo_root, commit
+    if not _looks_like_commit(commit):
+        for rel in sorted(present):
+            cannot.append((rel, f"invalid commit hash {commit!r}"))
+        return Plan(can, cannot), repo_root, None
 
     for rel in sorted(present):
         etag = rmap.etags.get(rel)
@@ -484,7 +494,7 @@ def execute_import(local_dir: Path, repo_root: Path, commit: str, revision: Opti
 
     # refs/<revision> -> commit. Skip writing a ref named like a bare commit, and
     # any ref at all when something was refused: the snapshot is incomplete.
-    ref = repo_root / "refs" / revision if revision else None
+    ref = repo_root / "refs" / revision if revision and _safe_ref(revision) else None
     if ref is not None and not _looks_like_commit(revision) and not problems \
             and not (ref_if_absent and ref.is_file()):
         ref.parent.mkdir(parents=True, exist_ok=True)

@@ -136,3 +136,22 @@ def test_files_without_metadata_use_the_hub_listing(tmp_path, monkeypatch):
     assert (root / "snapshots" / NEW / "extra.bin").read_bytes() == b"x"
     assert (root / "snapshots" / OLD / "README.md").exists()
     assert (root / "refs" / "main").read_text() == NEW
+
+
+def test_a_metadata_commit_that_is_not_a_hash_is_rejected(tmp_path, monkeypatch):
+    """The commit names snapshots/<commit>: a crafted one must not escape the cache."""
+    d = with_metadata(tmp_path, {"README.md": b"hello world\n"}, "../../../../escaped", {"README.md": GIT_HELLO})
+    maps = xfer.build_repo_maps(d, "org/name", "model", None, offline=True)
+    for rmap in maps:
+        plan, root, commit = xfer.plan_import(d, tmp_path / "hub", "org/name", "model", rmap)
+        assert commit is None and plan.can == []
+    assert not (tmp_path / "escaped").exists() and not (tmp_path.parent / "escaped").exists()
+
+
+def test_a_ref_name_that_climbs_out_of_refs_is_not_written(tmp_path):
+    d = local(tmp_path, {"README.md": b"hello world\n"})
+    rmap = RepoMap(commit_hash=COMMIT, etags={"README.md": GIT_HELLO}, source="hub")
+    plan, root, commit = xfer.plan_import(d, tmp_path / "hub", "org/name", "model", rmap)
+    xfer.execute_import(d, root, commit, "../../evil", plan, "copy", "hub")
+    assert not (tmp_path / "hub" / "evil").exists() and not (root / "evil").exists()
+    assert (root / "snapshots" / COMMIT / "README.md").exists()
